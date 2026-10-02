@@ -102,7 +102,7 @@ async def get_profile(profile_id: str) -> Optional[Dict[str, Any]]:
 
 
 async def get_all_profiles() -> List[Dict[str, Any]]:
-    """Retrieves all profiles along with their queue metrics, today's sent count, and 50/50 method breakdown."""
+    """Retrieves all profiles along with their queue metrics, today's sent count, 50/50 breakdown, and recycled count."""
     today_pattern = datetime.now().strftime("%Y-%m-%d") + "%"
     async with get_db() as conn:
         query = """
@@ -120,9 +120,10 @@ async def get_all_profiles() -> List[Dict[str, Any]]:
                 COUNT(CASE WHEN q.status = 'pending' THEN 1 END) AS pending_count,
                 COUNT(CASE WHEN q.status = 'completed' THEN 1 END) AS completed_count,
                 COUNT(CASE WHEN q.status = 'failed' THEN 1 END) AS failed_count,
-                COUNT(CASE WHEN q.status = 'completed' AND (q.processed_at LIKE ? OR (q.processed_at IS NULL AND q.created_at LIKE ?)) THEN 1 END) AS today_sent_count,
-                COUNT(CASE WHEN q.status = 'completed' AND (q.processed_at LIKE ? OR (q.processed_at IS NULL AND q.created_at LIKE ?)) AND (q.message_text LIKE '%LinkedIn Search%' OR q.message_text LIKE '%[Search]%') THEN 1 END) AS today_search_count,
-                COUNT(CASE WHEN q.status = 'completed' AND (q.processed_at LIKE ? OR (q.processed_at IS NULL AND q.created_at LIKE ?)) AND (q.message_text NOT LIKE '%LinkedIn Search%' AND q.message_text NOT LIKE '%[Search]%') THEN 1 END) AS today_network_count,
+                COUNT(CASE WHEN q.status = 'completed' AND (q.processed_at LIKE ? OR (q.processed_at IS NULL AND q.created_at LIKE ?)) AND (q.message_text NOT LIKE '%Recycled%' AND q.message_text NOT LIKE '%Withdrawn%') THEN 1 END) AS today_sent_count,
+                COUNT(CASE WHEN q.status = 'completed' AND (q.processed_at LIKE ? OR (q.processed_at IS NULL AND q.created_at LIKE ?)) AND (q.message_text LIKE '%LinkedIn Search%' OR q.message_text LIKE '%[Search]%') AND (q.message_text NOT LIKE '%Recycled%' AND q.message_text NOT LIKE '%Withdrawn%') THEN 1 END) AS today_search_count,
+                COUNT(CASE WHEN q.status = 'completed' AND (q.processed_at LIKE ? OR (q.processed_at IS NULL AND q.created_at LIKE ?)) AND (q.message_text NOT LIKE '%LinkedIn Search%' AND q.message_text NOT LIKE '%[Search]%') AND (q.message_text NOT LIKE '%Recycled%' AND q.message_text NOT LIKE '%Withdrawn%') THEN 1 END) AS today_network_count,
+                COUNT(CASE WHEN q.status = 'completed' AND (q.processed_at LIKE ? OR (q.processed_at IS NULL AND q.created_at LIKE ?)) AND (q.message_text LIKE '%Recycled%' OR q.message_text LIKE '%Withdrawn%') THEN 1 END) AS today_recycled_count,
                 COUNT(q.id) AS total_count
             FROM profiles p
             LEFT JOIN queue_items q ON p.id = q.profile_id
@@ -130,6 +131,7 @@ async def get_all_profiles() -> List[Dict[str, Any]]:
             ORDER BY p.created_at DESC
         """
         cursor = await conn.execute(query, (
+            today_pattern, today_pattern,
             today_pattern, today_pattern,
             today_pattern, today_pattern,
             today_pattern, today_pattern
@@ -236,7 +238,7 @@ async def record_daily_auto_run_completed(profile_id: str, run_date: str) -> Non
 
 
 async def get_today_sent_count(profile_id: str, date_str: Optional[str] = None) -> int:
-    """Retrieves the exact count of successful connection invitations sent today for a given profile."""
+    """Retrieves the exact count of successful NEW connection invitations sent today for a given profile (excluding recycled/withdrawn)."""
     if not date_str:
         date_str = datetime.now().strftime("%Y-%m-%d")
     pattern = f"{date_str}%"
@@ -247,6 +249,7 @@ async def get_today_sent_count(profile_id: str, date_str: Optional[str] = None) 
             FROM queue_items 
             WHERE profile_id = ? 
               AND status = 'completed' 
+              AND (message_text NOT LIKE '%Recycled%' AND message_text NOT LIKE '%Withdrawn%')
               AND (processed_at LIKE ? OR (processed_at IS NULL AND created_at LIKE ?))
             """,
             (profile_id, pattern, pattern)
@@ -256,7 +259,7 @@ async def get_today_sent_count(profile_id: str, date_str: Optional[str] = None) 
 
 
 async def get_today_method_counts(profile_id: str, date_str: Optional[str] = None) -> Dict[str, int]:
-    """Retrieves the counts of successful invitations sent today split by method ('search' vs 'network')."""
+    """Retrieves the counts of successful invitations sent today split by method ('search' vs 'network') and 'recycled'."""
     if not date_str:
         date_str = datetime.now().strftime("%Y-%m-%d")
     pattern = f"{date_str}%"
@@ -264,9 +267,10 @@ async def get_today_method_counts(profile_id: str, date_str: Optional[str] = Non
         cursor = await conn.execute(
             """
             SELECT 
-                COUNT(*) AS total_today,
-                COUNT(CASE WHEN message_text LIKE '%LinkedIn Search%' OR message_text LIKE '%[Search]%' THEN 1 END) AS search_count,
-                COUNT(CASE WHEN message_text NOT LIKE '%LinkedIn Search%' AND message_text NOT LIKE '%[Search]%' THEN 1 END) AS network_count
+                COUNT(CASE WHEN message_text NOT LIKE '%Recycled%' AND message_text NOT LIKE '%Withdrawn%' THEN 1 END) AS total_today,
+                COUNT(CASE WHEN (message_text LIKE '%LinkedIn Search%' OR message_text LIKE '%[Search]%') AND message_text NOT LIKE '%Recycled%' AND message_text NOT LIKE '%Withdrawn%' THEN 1 END) AS search_count,
+                COUNT(CASE WHEN message_text NOT LIKE '%LinkedIn Search%' AND message_text NOT LIKE '%[Search]%' AND message_text NOT LIKE '%Recycled%' AND message_text NOT LIKE '%Withdrawn%' THEN 1 END) AS network_count,
+                COUNT(CASE WHEN message_text LIKE '%Recycled%' OR message_text LIKE '%Withdrawn%' THEN 1 END) AS recycled_count
             FROM queue_items 
             WHERE profile_id = ? 
               AND status = 'completed' 
@@ -280,8 +284,54 @@ async def get_today_method_counts(profile_id: str, date_str: Optional[str] = Non
                 "total": row["total_today"] or 0,
                 "search": row["search_count"] or 0,
                 "network": row["network_count"] or 0,
+                "recycled": row["recycled_count"] or 0,
             }
-        return {"total": 0, "search": 0, "network": 0}
+        return {"total": 0, "search": 0, "network": 0, "recycled": 0}
+
+
+async def record_recycled_invitation(
+    profile_id: str,
+    target_url: str,
+    name: Optional[str] = None,
+    resent_success: bool = True
+) -> None:
+    """Records that a stale invitation (>1 week old) was withdrawn and resent."""
+    clean_target = target_url.strip().rstrip("/")
+    status_label = "Withdrawn & Resent" if resent_success else "Withdrawn"
+    note_text = f"Recycled invitation (>1 week): {status_label}"
+    if name:
+        note_text += f" ({name})"
+    error_msg = "Invitation withdrawn and resent successfully" if resent_success else "Invitation withdrawn from LinkedIn"
+
+    now_ts = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+    async with get_db() as conn:
+        cursor = await conn.execute(
+            """
+            SELECT id FROM queue_items 
+            WHERE profile_id = ? AND (target_url = ? OR target_url = ?)
+            LIMIT 1
+            """,
+            (profile_id, clean_target, f"{clean_target}/")
+        )
+        row = await cursor.fetchone()
+        if row:
+            await conn.execute(
+                """
+                UPDATE queue_items 
+                SET status = 'completed', message_text = ?, error_message = ?, processed_at = ?
+                WHERE id = ?
+                """,
+                (note_text, error_msg, now_ts, row["id"])
+            )
+        else:
+            await conn.execute(
+                """
+                INSERT INTO queue_items (profile_id, target_url, message_text, status, error_message, processed_at)
+                VALUES (?, ?, ?, 'completed', ?, ?)
+                """,
+                (profile_id, clean_target, note_text, error_msg, now_ts)
+            )
+        await conn.commit()
 
 
 async def reset_stale_profile_statuses() -> int:

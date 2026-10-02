@@ -267,6 +267,53 @@ async def trigger_auto_send_session(
     )
 
 
+@app.post("/profiles/recycle/{target_profile_id}")
+async def trigger_recycle_stale_invitations(
+    target_profile_id: str,
+    background_tasks: BackgroundTasks
+):
+    """
+    Directly navigates to LinkedIn 'Sent Invitations' section, locates invitations sent
+    more than 1 week ago, withdraws them, and resends them (outside of the 30 daily cap).
+    """
+    profile = await db.get_profile(target_profile_id)
+    if not profile:
+        raise HTTPException(status_code=404, detail="Profile not found")
+
+    if profile["status"] != "idle":
+        return RedirectResponse(
+            url=f"/?error=Profile+{target_profile_id}+is+currently+{profile['status']}", 
+            status_code=303
+        )
+
+    async def run_recycle_worker():
+        await db.update_profile_status(target_profile_id, "running")
+        try:
+            context, pw_instance, is_new = await engine.get_or_create_context(
+                profile_id=target_profile_id,
+                headless=False,
+                proxy_url=profile.get("proxy_url")
+            )
+            page = await context.new_page()
+            await page.bring_to_front()
+            await engine.withdraw_and_resend_stale_invitations(page, target_profile_id, max_recycle=25)
+            try:
+                await page.close()
+            except Exception:
+                pass
+        except Exception as e:
+            logger.error(f"Error in recycle worker for {target_profile_id}: {e}", exc_info=True)
+        finally:
+            await db.update_profile_status(target_profile_id, "idle", update_last_run=True)
+
+    background_tasks.add_task(run_recycle_worker)
+
+    return RedirectResponse(
+        url=f"/?success=Checking+and+recycling+stale+invitations+(>1+week+old)+for+{target_profile_id}...", 
+        status_code=303
+    )
+
+
 # ==========================================
 # Daily Auto-Pilot Scheduler Controls
 # ==========================================

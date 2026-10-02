@@ -163,7 +163,7 @@
                             </span>
                         </div>
                         <p class="text-xs text-gray-400 mt-0.5">
-                            Automatically runs daily in background without asking for manual permission. Sends <span class="text-cyan-300 font-semibold">50% via LinkedIn Search</span> (High-Profile Tech Leaders, Tech Insiders & Tech HRs) and <span class="text-emerald-300 font-semibold">50% via My Network</span> (&gt;100 Mutual Connections) up to your daily cap limit.
+                            Automatically runs daily in background without asking for manual permission. Sends <span class="text-cyan-300 font-semibold">50% via LinkedIn Search</span> (High-Profile Tech Leaders, Tech Insiders & Tech HRs) and <span class="text-emerald-300 font-semibold">50% via My Network</span> (&gt;100 Mutual Connections) up to your daily cap limit. Also withdraws &amp; resends invitations sent <span class="text-purple-300 font-semibold">&gt;1 week ago</span> (outside daily cap limit).
                         </p>
                     </div>
                 </div>
@@ -369,8 +369,8 @@
                                 <div class="h-full rounded-full transition-all duration-500 {% if pct >= 100 %}bg-gradient-to-r from-emerald-500 to-teal-400{% else %}bg-gradient-to-r from-amber-500 to-indigo-500{% endif %}" style="width: {{ pct }}%;"></div>
                             </div>
 
-                            <!-- 50/50 Split Method Breakdown -->
-                            <div class="flex items-center justify-between text-[10px] text-gray-400 px-0.5 pt-0.5">
+                            <!-- 50/50 Split Method Breakdown & Recycle Count -->
+                            <div class="flex flex-wrap items-center justify-between text-[10px] text-gray-400 px-0.5 pt-0.5 gap-y-1">
                                 <span class="flex items-center space-x-1" title="High-Profile Tech Leaders, Insiders & HRs via LinkedIn Search">
                                     <span class="w-1.5 h-1.5 rounded-full bg-cyan-400"></span>
                                     <span>Search: <strong class="text-cyan-300 font-semibold">{{ p.today_search_count or 0 }}</strong>/{{ p.daily_limit // 2 }}</span>
@@ -379,6 +379,12 @@
                                     <span class="w-1.5 h-1.5 rounded-full bg-emerald-400"></span>
                                     <span>Network: <strong class="text-emerald-300 font-semibold">{{ p.today_network_count or 0 }}</strong>/{{ p.daily_limit - (p.daily_limit // 2) }}</span>
                                 </span>
+                                {% if (p.today_recycled_count or 0) > 0 %}
+                                <span class="flex items-center space-x-1" title="Stale invitations (>1 week ago) withdrawn and resent today (outside the 30 daily cap)">
+                                    <span class="w-1.5 h-1.5 rounded-full bg-purple-400"></span>
+                                    <span>Recycled (>1w): <strong class="text-purple-300 font-semibold">{{ p.today_recycled_count or 0 }}</strong></span>
+                                </span>
+                                {% endif %}
                             </div>
 
                             <!-- Progress / Queue Pill Counters -->
@@ -426,6 +432,13 @@
                                                 <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M10 6H6a2 2 0 00-2 2v10a2 2 0 002 2h10a2 2 0 002-2v-4M14 4h6m0 0v6m0-6L10 14"/>
                                             </svg>
                                             <span class="font-medium">Headed Login</span>
+                                        </button>
+                                    </form>
+
+                                    <!-- Recycle Stale (>1W) Invitations -->
+                                    <form action="/profiles/recycle/{{ p.id }}" method="POST" class="inline" onsubmit="return confirm('Check Sent Invitations section for invitations sent > 1 week ago, withdraw them, and resend them? Note: This does NOT count towards the daily cap.');">
+                                        <button type="submit" {% if p.status != 'idle' %}disabled class="opacity-40 cursor-not-allowed px-2.5 py-1 rounded bg-gray-800 text-gray-400 text-xs"{% else %}class="px-2.5 py-1 rounded bg-purple-900/40 hover:bg-purple-900/60 text-purple-300 border border-purple-700/50 text-xs flex items-center space-x-1.5 transition shadow-sm font-medium"{% endif %} title="Go to Sent Invitations, withdraw invitations older than 1 week, and resend them (outside daily cap)">
+                                            <span>♻️ Recycle Stale (&gt;1W)</span>
                                         </button>
                                     </form>
                                 </div>
@@ -609,6 +622,8 @@
                                                 <span class="px-1.5 py-0.5 rounded text-[9px] font-semibold bg-cyan-950/80 text-cyan-300 border border-cyan-800/70 mr-1 shadow-sm">Search</span>
                                                 {% elif 'mutual' in item.message_text %}
                                                 <span class="px-1.5 py-0.5 rounded text-[9px] font-semibold bg-emerald-950/80 text-emerald-300 border border-emerald-800/70 mr-1 shadow-sm">Network</span>
+                                                {% elif 'Recycled' in item.message_text or 'Withdrawn' in item.message_text %}
+                                                <span class="px-1.5 py-0.5 rounded text-[9px] font-semibold bg-purple-950/80 text-purple-300 border border-purple-800/70 mr-1 shadow-sm">Recycled</span>
                                                 {% endif %}
                                                 <span class="text-gray-300">{{ item.message_text }}</span>
                                             {% else %}

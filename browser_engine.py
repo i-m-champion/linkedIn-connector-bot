@@ -773,6 +773,98 @@ SCRIPT_SCAN_SEARCH_CANDIDATES = r"""
 })()
 """
 
+# Client-side script scanning LinkedIn Sent Invitations page (/mynetwork/invitation-manager/sent/)
+# Filters for invitations that were sent > 1 week ago (e.g. "1 week ago", "2 weeks ago", "1 month ago", "7+ days ago")
+SCRIPT_SCAN_SENT_INVITATIONS = r"""
+(() => {
+    function isOlderThanOneWeek(text) {
+        if (!text) return false;
+        const lower = text.toLowerCase();
+        // Check for weeks, months, years ago
+        if (/\b\d+\s*(?:week|month|year)s?\s*ago\b/i.test(lower)) return true;
+        if (/\b(?:a|one)\s*(?:week|month|year)\s*ago\b/i.test(lower)) return true;
+        // Check for 7+ days ago
+        const daysMatch = lower.match(/\b(\d+)\s*days?\s*ago\b/i);
+        if (daysMatch && parseInt(daysMatch[1], 10) >= 7) return true;
+        return false;
+    }
+
+    const items = [];
+    const seen = new Set();
+    let tagIdx = Date.now();
+
+    const cardSelectors = [
+        'li.invitation-card',
+        'div.invitation-card',
+        '[data-view-name*="invitation"]',
+        'ul.mn-invitation-list li',
+        '.mn-invitation-list__item',
+        'li:has(button)'
+    ];
+    const cards = document.querySelectorAll(cardSelectors.join(', '));
+
+    for (const card of cards) {
+        // Extract profile link
+        const link = card.querySelector('a.invitation-card__link[href*="/in/"]') || 
+                     card.querySelector('a[href*="/in/"]');
+        if (!link || !link.href || !link.href.includes('/in/')) continue;
+
+        let rawUrl = link.href;
+        if (rawUrl.startsWith('/')) rawUrl = 'https://www.linkedin.com' + rawUrl;
+        const cleanUrl = rawUrl.split('?')[0].split('#')[0].replace(/\/$/, '');
+        if (!cleanUrl || !cleanUrl.includes('/in/') || seen.has(cleanUrl)) continue;
+
+        // Find Withdraw button on this card
+        let withdrawBtn = null;
+        const buttons = card.querySelectorAll('button, a[role="button"]');
+        for (const b of buttons) {
+            const txt = (b.innerText || b.textContent || '').trim().toLowerCase();
+            const aria = (b.getAttribute('aria-label') || '').toLowerCase();
+            if (txt.includes('withdraw') || aria.includes('withdraw')) {
+                withdrawBtn = b;
+                break;
+            }
+        }
+        if (!withdrawBtn) continue;
+
+        // Find time sent text
+        const cardText = (card.innerText || card.textContent || '').trim();
+        const timeEl = card.querySelector('time, .time-badge, .invitation-card__time-ago');
+        const timeText = timeEl ? (timeEl.innerText || timeEl.textContent || '').trim() : '';
+
+        const fullTextForTime = timeText || cardText;
+        if (!isOlderThanOneWeek(fullTextForTime)) {
+            continue; // Skip if less than 1 week old
+        }
+
+        // Extract candidate name
+        const nameEl = card.querySelector(
+            '.invitation-card__title, span[aria-hidden="true"], h3, a[href*="/in/"]'
+        );
+        let name = nameEl ? (nameEl.innerText || nameEl.textContent || '').trim().split('\n')[0] : 'Member';
+        if (!name || name.length > 50) name = 'Member';
+
+        seen.add(cleanUrl);
+        tagIdx++;
+        const cardTag = 'ac-wd-card-' + tagIdx;
+        const btnTag = 'ac-wd-btn-' + tagIdx;
+        card.setAttribute('data-ac-wd-card', cardTag);
+        withdrawBtn.setAttribute('data-ac-wd-btn', btnTag);
+
+        items.push({
+            cardTag: cardTag,
+            btnTag: btnTag,
+            url: cleanUrl,
+            profile_url: cleanUrl,
+            name: name,
+            timeText: timeText || '1+ week ago'
+        });
+    }
+
+    return items;
+})()
+"""
+
 
 async def send_candidate_invitation(page: Page, cand: Dict[str, Any]) -> str:
     """
@@ -1363,7 +1455,187 @@ async def auto_send_dual_strategy_invitations(
     else:
         logger.warning(f"⚠️ Dispatch finished with {already_sent_today}/{daily_limit} invitations sent today for '{profile_id}' (Search: {search_sent_today}, Network: {network_sent_today}).")
 
+    # Phase 4: Stale Invitations Recycling (>1 week old) - Outside of the 30 daily cap!
+    try:
+        recycled = await withdraw_and_resend_stale_invitations(page=page, profile_id=profile_id, max_recycle=20)
+        if recycled > 0:
+            logger.info(f"♻️ Recycled and resent {recycled} stale invitation(s) (>1 week old) for '{profile_id}' (outside of daily cap).")
+    except Exception as rec_err:
+        logger.warning(f"Error during stale invitations recycling: {rec_err}")
+
     return total_sent_this_session
+
+
+async def withdraw_and_resend_stale_invitations(
+    page: Page,
+    profile_id: str,
+    max_recycle: int = 20
+) -> int:
+    """
+    Navigates to the 'Sent Invitations' section (/mynetwork/invitation-manager/sent/),
+    locates pending invitations sent more than 1 week ago, withdraws them, and
+    attempts to resend the connection invitation.
+    IMPORTANT: This is independent from and outside of the 30 daily new connections cap!
+    """
+    sent_url = "https://www.linkedin.com/mynetwork/invitation-manager/sent/"
+    logger.info(f"♻️ [Recycle Engine] Navigating to sent invitations section for '{profile_id}' to inspect invitations sent > 1 week ago...")
+
+    try:
+        await page.goto(sent_url, wait_until="domcontentloaded", timeout=45000)
+        await asyncio.sleep(2.5)
+    except Exception as e:
+        logger.error(f"Failed navigating to sent invitations manager: {e}")
+        return 0
+
+    recycled_count = 0
+    attempted_urls = set()
+
+    for pass_idx in range(5):
+        if recycled_count >= max_recycle:
+            break
+
+        # Gentle scroll down to trigger cards hydration
+        try:
+            await page.mouse.wheel(0, 1000)
+            await asyncio.sleep(1.0)
+        except Exception:
+            pass
+
+        stale_items = await page.evaluate(SCRIPT_SCAN_SENT_INVITATIONS)
+        unprocessed = [it for it in stale_items if it.get("url") not in attempted_urls]
+
+        if not unprocessed:
+            logger.info(f"No more stale invitations (>1 week old) detected on pass {pass_idx + 1}.")
+            # Check if there is a next page button
+            try:
+                next_btn = page.locator("button[aria-label='Next'], a.artdeco-pagination__button--next").first
+                if await next_btn.count() > 0 and await next_btn.is_visible() and not await next_btn.is_disabled():
+                    logger.info("Clicking next page on sent invitations manager...")
+                    await next_btn.click()
+                    await asyncio.sleep(2.5)
+                    continue
+            except Exception:
+                pass
+            break
+
+        logger.info(f"Found {len(unprocessed)} stale invitation(s) sent > 1 week ago on pass {pass_idx + 1}.")
+
+        for item in unprocessed:
+            if recycled_count >= max_recycle:
+                break
+
+            cand_url = item.get("url")
+            name = item.get("name", "Member")
+            btn_tag = item.get("btnTag")
+            time_text = item.get("timeText", "1+ week ago")
+
+            if cand_url in attempted_urls:
+                continue
+            attempted_urls.add(cand_url)
+
+            logger.info(f"♻️ Withdrawing invitation for {name} sent {time_text} ({cand_url})...")
+
+            # 1. Scroll button into view
+            try:
+                await page.evaluate(f"""() => {{
+                    const b = document.querySelector("[data-ac-wd-btn='{btn_tag}']");
+                    if (b) b.scrollIntoView({{ behavior: 'instant', block: 'center' }});
+                }}""")
+                await asyncio.sleep(0.3)
+            except Exception:
+                pass
+
+            # 2. Click Withdraw button on the card
+            clicked = False
+            btn_loc = page.locator(f"[data-ac-wd-btn='{btn_tag}']").first
+            if await btn_loc.count() > 0:
+                try:
+                    await btn_loc.click(timeout=1500)
+                    clicked = True
+                except Exception:
+                    pass
+
+            if not clicked:
+                clicked = await page.evaluate(f"""() => {{
+                    const b = document.querySelector("[data-ac-wd-btn='{btn_tag}']");
+                    if (b) {{ b.click(); return true; }}
+                    return false;
+                }}""")
+
+            if not clicked:
+                logger.warning(f"Could not click Withdraw for {name}")
+                continue
+
+            await asyncio.sleep(random.uniform(0.7, 1.2))
+
+            # 3. Confirm withdrawal in confirmation dialog
+            confirmed = False
+            try:
+                confirm_btn = page.locator(
+                    "div[role='dialog'] button:has-text('Withdraw'), div[role='dialog'] button.artdeco-button--primary"
+                ).first
+                if await confirm_btn.count() > 0 and await confirm_btn.is_visible():
+                    await confirm_btn.click()
+                    confirmed = True
+                    logger.info(f"Confirmed withdrawal for {name}")
+            except Exception as e:
+                logger.debug(f"Modal button click error: {e}")
+
+            if not confirmed:
+                confirmed = await page.evaluate("""() => {
+                    const dialog = document.querySelector('div[role="dialog"]');
+                    if (!dialog) return false;
+                    const btns = Array.from(dialog.querySelectorAll('button'));
+                    for (const b of btns) {
+                        const txt = (b.innerText || b.textContent || '').trim().toLowerCase();
+                        if (txt === 'withdraw' || txt.includes('withdraw')) {
+                            b.click();
+                            return true;
+                        }
+                    }
+                    return false;
+                }""")
+
+            if not confirmed:
+                logger.warning(f"Could not confirm withdrawal modal for {name}")
+                continue
+
+            await asyncio.sleep(random.uniform(1.2, 2.0))
+
+            # 4. Attempt to resend connection request
+            resent = False
+            if cand_url:
+                logger.info(f"Attempting to resend invitation to {name} ({cand_url})...")
+                try:
+                    res = await execute_interaction_step(page, cand_url)
+                    if res.get("success"):
+                        resent = True
+                        logger.info(f"✓ Successfully resent invitation to {name}!")
+                    else:
+                        logger.info(f"Resend notice for {name}: {res.get('message')}")
+                except Exception as resend_err:
+                    logger.warning(f"Resend interaction failed for {name}: {resend_err}")
+
+                # Return back to sent invitations page
+                try:
+                    await page.goto(sent_url, wait_until="domcontentloaded", timeout=45000)
+                    await asyncio.sleep(2.0)
+                except Exception:
+                    pass
+
+            # 5. Record recycled invitation in database (does NOT count towards daily cap!)
+            await db.record_recycled_invitation(
+                profile_id=profile_id,
+                target_url=cand_url,
+                name=name,
+                resent_success=resent
+            )
+            recycled_count += 1
+            logger.info(f"✓ [Recycle Engine] Processed #{recycled_count}: {name} (Withdrawn & Resent: {resent})")
+            await asyncio.sleep(random.uniform(1.5, 2.5))
+
+    logger.info(f"♻️ [Recycle Engine] Finished: Withdrew and processed {recycled_count} stale invitations for '{profile_id}'.")
+    return recycled_count
 
 
 
