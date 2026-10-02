@@ -22,10 +22,10 @@ LAST_CHECK_TIME: Optional[str] = None
 
 async def run_profile_daily_automation(profile_id: str, force: bool = False) -> Dict[str, Any]:
     """
-    Executes the automated daily connection run for a single profile:
-    - Navigates to My Network (/mynetwork/grow/ & /mynetwork/)
-    - Finds people with >= 100 connections / mutual connections
-    - Automatically sends invitations until the profile reaches its FULL daily cap limit
+    Executes the automated daily connection run for a single profile using the 50/50 Dual Strategy:
+    - 50% via LinkedIn Search (High-Profile Tech Leaders, Tech Insiders, Tech HRs)
+    - 50% via My Network (100+ Mutual Connections)
+    - Automatically sends invitations until the profile reaches its FULL daily cap limit (default 30/day)
     - Only marks as fully completed for today once daily_limit invitations have been reached!
     """
     profile = await db.get_profile(profile_id)
@@ -44,8 +44,9 @@ async def run_profile_daily_automation(profile_id: str, force: bool = False) -> 
 
     remaining_to_send = max(0, daily_limit - already_sent_today)
     logger.info(
-        f"⏰ [Daily Auto-Pilot] Launching unattended daily run for '{profile_id}': "
-        f"Already sent today: {already_sent_today}/{daily_limit}. Sending remaining {remaining_to_send} invitations to hit full cap..."
+        f"⏰ [Daily Auto-Pilot] Launching 50/50 dual-strategy daily run for '{profile_id}': "
+        f"Already sent today: {already_sent_today}/{daily_limit}. Sending remaining {remaining_to_send} invitations "
+        f"(50% LinkedIn Search [Tech Leaders, Insiders, HRs] + 50% My Network [>100 Mutual Connections])..."
     )
 
     try:

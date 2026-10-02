@@ -102,7 +102,7 @@ async def get_profile(profile_id: str) -> Optional[Dict[str, Any]]:
 
 
 async def get_all_profiles() -> List[Dict[str, Any]]:
-    """Retrieves all profiles along with their queue metrics and today's sent count."""
+    """Retrieves all profiles along with their queue metrics, today's sent count, and 50/50 method breakdown."""
     today_pattern = datetime.now().strftime("%Y-%m-%d") + "%"
     async with get_db() as conn:
         query = """
@@ -121,13 +121,19 @@ async def get_all_profiles() -> List[Dict[str, Any]]:
                 COUNT(CASE WHEN q.status = 'completed' THEN 1 END) AS completed_count,
                 COUNT(CASE WHEN q.status = 'failed' THEN 1 END) AS failed_count,
                 COUNT(CASE WHEN q.status = 'completed' AND (q.processed_at LIKE ? OR (q.processed_at IS NULL AND q.created_at LIKE ?)) THEN 1 END) AS today_sent_count,
+                COUNT(CASE WHEN q.status = 'completed' AND (q.processed_at LIKE ? OR (q.processed_at IS NULL AND q.created_at LIKE ?)) AND (q.message_text LIKE '%LinkedIn Search%' OR q.message_text LIKE '%[Search]%') THEN 1 END) AS today_search_count,
+                COUNT(CASE WHEN q.status = 'completed' AND (q.processed_at LIKE ? OR (q.processed_at IS NULL AND q.created_at LIKE ?)) AND (q.message_text NOT LIKE '%LinkedIn Search%' AND q.message_text NOT LIKE '%[Search]%') THEN 1 END) AS today_network_count,
                 COUNT(q.id) AS total_count
             FROM profiles p
             LEFT JOIN queue_items q ON p.id = q.profile_id
             GROUP BY p.id
             ORDER BY p.created_at DESC
         """
-        cursor = await conn.execute(query, (today_pattern, today_pattern))
+        cursor = await conn.execute(query, (
+            today_pattern, today_pattern,
+            today_pattern, today_pattern,
+            today_pattern, today_pattern
+        ))
         rows = await cursor.fetchall()
         return [dict(r) for r in rows]
 
@@ -249,6 +255,35 @@ async def get_today_sent_count(profile_id: str, date_str: Optional[str] = None) 
         return row["sent_today"] if row else 0
 
 
+async def get_today_method_counts(profile_id: str, date_str: Optional[str] = None) -> Dict[str, int]:
+    """Retrieves the counts of successful invitations sent today split by method ('search' vs 'network')."""
+    if not date_str:
+        date_str = datetime.now().strftime("%Y-%m-%d")
+    pattern = f"{date_str}%"
+    async with get_db() as conn:
+        cursor = await conn.execute(
+            """
+            SELECT 
+                COUNT(*) AS total_today,
+                COUNT(CASE WHEN message_text LIKE '%LinkedIn Search%' OR message_text LIKE '%[Search]%' THEN 1 END) AS search_count,
+                COUNT(CASE WHEN message_text NOT LIKE '%LinkedIn Search%' AND message_text NOT LIKE '%[Search]%' THEN 1 END) AS network_count
+            FROM queue_items 
+            WHERE profile_id = ? 
+              AND status = 'completed' 
+              AND (processed_at LIKE ? OR (processed_at IS NULL AND created_at LIKE ?))
+            """,
+            (profile_id, pattern, pattern)
+        )
+        row = await cursor.fetchone()
+        if row:
+            return {
+                "total": row["total_today"] or 0,
+                "search": row["search_count"] or 0,
+                "network": row["network_count"] or 0,
+            }
+        return {"total": 0, "search": 0, "network": 0}
+
+
 async def reset_stale_profile_statuses() -> int:
     """Resets any profiles left in 'running' or 'authenticating' back to 'idle' on startup or recovery."""
     async with get_db() as conn:
@@ -317,18 +352,25 @@ async def add_discovered_target(profile_id: str, target_url: str, mutual_count: 
 async def record_sent_connection(
     profile_id: str, 
     target_url: str, 
-    mutual_count: int, 
+    mutual_count: int = 0, 
     name: Optional[str] = None,
-    role_label: Optional[str] = None
+    role_label: Optional[str] = None,
+    method: str = "network"
 ) -> None:
-    """Records that a connection invitation was sent to a target profile."""
+    """Records that a connection invitation was sent to a target profile, tagging whether via LinkedIn Search or My Network."""
     clean_target = target_url.strip().rstrip("/")
-    note_text = f"Sent invitation: {mutual_count} mutual connections"
-    if role_label:
-        note_text += f" | {role_label}"
-    if name:
-        note_text += f" ({name})"
+    if method == "search":
+        note_text = f"Sent invitation: [LinkedIn Search] | {role_label or 'Tech Leader'}"
+        if name:
+            note_text += f" ({name})"
+    else:
+        note_text = f"Sent invitation: {mutual_count} mutual connections"
+        if role_label:
+            note_text += f" | {role_label}"
+        if name:
+            note_text += f" ({name})"
 
+    now_ts = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
     async with get_db() as conn:
         cursor = await conn.execute(
             """
@@ -343,18 +385,18 @@ async def record_sent_connection(
             await conn.execute(
                 """
                 UPDATE queue_items 
-                SET status = 'completed', message_text = ?, error_message = 'Invitation sent successfully', processed_at = datetime('now')
+                SET status = 'completed', message_text = ?, error_message = 'Invitation sent successfully', processed_at = ?
                 WHERE id = ?
                 """,
-                (note_text, row["id"])
+                (note_text, now_ts, row["id"])
             )
         else:
             await conn.execute(
                 """
                 INSERT INTO queue_items (profile_id, target_url, message_text, status, error_message, processed_at)
-                VALUES (?, ?, ?, 'completed', 'Invitation sent successfully', datetime('now'))
+                VALUES (?, ?, ?, 'completed', 'Invitation sent successfully', ?)
                 """,
-                (profile_id, clean_target, note_text)
+                (profile_id, clean_target, note_text, now_ts)
             )
         await conn.commit()
 
@@ -425,14 +467,15 @@ async def get_pending_queue_items(profile_id: str, limit: int = 15) -> List[Dict
 
 async def update_queue_item_status(item_id: int, status: str, error_message: Optional[str] = None) -> None:
     """Updates the status and timestamps of a queue item."""
+    now_ts = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
     async with get_db() as conn:
         await conn.execute(
             """
             UPDATE queue_items 
-            SET status = ?, error_message = ?, processed_at = datetime('now')
+            SET status = ?, error_message = ?, processed_at = ?
             WHERE id = ?
             """,
-            (status, error_message, item_id)
+            (status, error_message, now_ts, item_id)
         )
         await conn.commit()
 

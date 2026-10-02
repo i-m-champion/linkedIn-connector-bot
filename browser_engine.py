@@ -14,7 +14,7 @@ import random
 import asyncio
 import logging
 from datetime import datetime
-from urllib.parse import urlparse
+from urllib.parse import urlparse, quote
 from typing import Optional, Dict, Any, List
 
 from playwright.async_api import async_playwright, BrowserContext, Page, TimeoutError as PlaywrightTimeoutError
@@ -566,6 +566,213 @@ SCRIPT_SCAN_CANDIDATES = r"""
 })()
 """
 
+# Curated search query pools for high-profile tech leaders, tech insiders, and tech HRs
+SEARCH_QUERY_POOLS = [
+    # High-Profile Tech Leaders & Founders
+    '"VP of Engineering" OR "Director of Engineering" OR "Head of Engineering"',
+    '"CTO" OR "Tech Founder" OR "Chief Technology Officer"',
+    # Tech Insiders & Principal/Staff Engineers
+    '"Principal Software Engineer" OR "Staff Software Engineer" OR "Distinguished Engineer"',
+    '"Tech Lead" OR "Lead Software Engineer" OR "Principal Architect"',
+    # Tech Companies HRs & Recruiters
+    '"Technical Recruiter" OR "Lead Technical Recruiter" OR "Head of Talent"',
+    '"Talent Acquisition" OR "Engineering Recruiter" OR "Head of People"',
+]
+
+# Client-side script scanning LinkedIn Search Results specifically targeting:
+# 1. High-Profile Tech Leaders (VP of Engineering, Director of Engineering, CTO, Tech Founder)
+# 2. Tech Insiders (Principal/Staff Software Engineers, Distinguished Engineers, Tech Leads)
+# 3. Tech Companies HRs (Technical Recruiters, Head of Talent, Talent Acquisition)
+SCRIPT_SCAN_SEARCH_CANDIDATES = r"""
+(() => {
+    const r1 = /([\d,]+)\s*\+?\s*(?:others?\s+)?(?:mutual(?:\s+connections?)?|connections?\s+in\s+common|in\s+common|connections?)/i;
+    const r2 = /(?:mutual(?:\s+connections?)?|connections?\s+in\s+common|in\s+common|connections?)[\s:]+([\d,]+)/i;
+    const r3 = /([\d,]+)\s*\+\s*connections?/i;
+
+    function extractCount(text) {
+        if (!text) return 0;
+        const kMatch = text.match(/([\d\.]+)\s*k\+?\s*(?:mutual|connections?)/i);
+        if (kMatch && kMatch[1]) {
+            const val = parseFloat(kMatch[1]) * 1000;
+            return isNaN(val) ? 0 : Math.round(val);
+        }
+        const m = text.match(r1) || text.match(r2) || text.match(r3);
+        if (m && m[1]) {
+            const val = parseInt(m[1].replace(/,/g, ''), 10);
+            return isNaN(val) ? 0 : val;
+        }
+        return 0;
+    }
+
+    function evaluateCandidateQuality(headline, fullCardText) {
+        const text = ((headline || '') + ' ' + (fullCardText || '')).toLowerCase();
+
+        // 1. High-Profile Tech Leaders & Tech Founders
+        const leaderRegex = /\b(vp of engineering|vice president of engineering|director of engineering|head of engineering|chief technology officer|cto|co-founder|founder|cofounder|chief architect|head of technology|vp of technology|director of technology|vp of product|head of product|founding engineer|founding partner|chief executive officer|ceo)\b/i;
+        const isLeader = leaderRegex.test(text);
+
+        // 2. Tech Insiders (Principal/Staff Engineers, Architects, Tech Leads)
+        const insiderRegex = /\b(principal software engineer|principal engineer|staff software engineer|staff engineer|distinguished engineer|senior staff engineer|principal architect|solutions architect|lead architect|tech lead|engineering lead|staff swe|principal swe)\b/i;
+        const isInsider = insiderRegex.test(text);
+
+        // 3. Tech Companies HRs (Technical Recruiters, Head of Talent, Talent Acquisition)
+        const hrRegex = /\b(technical recruiter|lead technical recruiter|senior technical recruiter|recruiting lead|recruiting manager|head of talent|talent acquisition|talent partner|head of people|people operations|people ops|tech recruiter|engineering recruiter|talent lead|staffing lead|talent advisor|hrbp|sourcer|technical sourcer)\b/i;
+        const isHR = hrRegex.test(text);
+
+        // 4. Software Engineers & Tech Specialists
+        const sweRegex = /\b(software engineer|software developer|swe|sde|sde[- ]?[123i]+|frontend|front-end|backend|back-end|full stack|fullstack|full-stack|devops|site reliability|sre|cloud engineer|platform engineer|systems engineer|data engineer|data scientist|ai engineer|machine learning|ml engineer|deep learning|security engineer|ios developer|android developer|mobile engineer)\b/i;
+        const isEngineer = sweRegex.test(text);
+
+        if (!isLeader && !isInsider && !isHR && !isEngineer) {
+            return null;
+        }
+
+        const bigTechRegex = /\b(google|microsoft|amazon|meta|facebook|apple|netflix|uber|stripe|airbnb|salesforce|nvidia|oracle|adobe|atlassian|linkedin|openai|anthropic|databricks|snowflake|palantir|bytedance|cisco|intel|amd|qualcomm|ibm|spotify|shopify|lyft|coinbase|robinhood|github|gitlab|cloudflare|datadog|mongodb|zoom|dropbox|snap|pinterest)\b/i;
+        const isBigTech = bigTechRegex.test(text);
+
+        const techContextRegex = /\b(tech|technology|technologies|software|labs|ai|startup|saas|cloud|fintech|robotics|ventures|capital|digital|systems|infra|platform|app|code|web)\b/i;
+        const hasTechContext = isBigTech || techContextRegex.test(text);
+
+        let category = "";
+        let roleLabel = "";
+        let baseScore = 0;
+
+        if (isLeader) {
+            category = "TECH_LEADER";
+            roleLabel = isBigTech ? "High-Profile Tech Leader (Big Tech)" : "High-Profile Tech Leader";
+            baseScore = 100;
+        } else if (isInsider) {
+            category = "TECH_INSIDER";
+            roleLabel = isBigTech ? "Tech Insider (Big Tech Staff/Principal)" : "Tech Insider (Staff/Principal)";
+            baseScore = 96;
+        } else if (isHR) {
+            category = "TECH_HR";
+            roleLabel = isBigTech ? "Tech Company HR (Big Tech)" : "Tech Company HR / Recruiter";
+            baseScore = 94;
+        } else if (isEngineer) {
+            category = "SOFTWARE_ENGINEER";
+            roleLabel = isBigTech ? "Software Engineer (Big Tech)" : (hasTechContext ? "Software Engineer (Tech)" : "Software Engineer");
+            baseScore = 85;
+        }
+
+        if (isBigTech) baseScore += 20;
+        if (hasTechContext) baseScore += 10;
+
+        return {
+            category: category,
+            roleLabel: roleLabel,
+            isBigTech: isBigTech,
+            hasTechContext: hasTechContext,
+            score: baseScore
+        };
+    }
+
+    function isConnectButton(b) {
+        if (!b) return false;
+        const txt = (b.innerText || b.textContent || '').trim().toLowerCase();
+        const aria = (b.getAttribute('aria-label') || '').toLowerCase();
+        
+        if (txt.includes('pending') || txt.includes('message') || txt.includes('following') || 
+            txt.includes('withdraw') || aria.includes('pending') || aria.includes('message') || 
+            aria.includes('following') || aria.includes('withdraw')) {
+            return false;
+        }
+        return txt === 'connect' || txt.startsWith('connect') || aria.includes('invite') || aria.includes('connect');
+    }
+
+    const candidateMap = new Map();
+    let tagIdx = Date.now();
+
+    const cardSelectors = [
+        'li.reusable-search__result-container',
+        'div.entity-result',
+        '[data-view-name*="search-entity-result"]',
+        '.entity-result__item',
+        'li.artdeco-card',
+        '.search-results-container li'
+    ];
+    const cards = document.querySelectorAll(cardSelectors.join(', '));
+
+    for (const card of cards) {
+        const link = card.querySelector('a.app-aware-link[href*="/in/"]') || card.querySelector('a[href*="/in/"]');
+        if (!link || !link.href || !link.href.includes('/in/')) continue;
+
+        let rawUrl = link.href;
+        if (rawUrl.startsWith('/')) rawUrl = 'https://www.linkedin.com' + rawUrl;
+        const cleanUrl = rawUrl.split('?')[0].split('#')[0].replace(/\/$/, '');
+        if (!cleanUrl || !cleanUrl.includes('/in/') || candidateMap.has(cleanUrl)) continue;
+
+        const cardText = (card.innerText || card.textContent || '').trim();
+        const lower = cardText.toLowerCase();
+        if (lower.includes('invitation sent') || lower.includes('pending') || lower.includes('withdraw') || lower.includes('• 1st') || lower.includes('1st degree')) {
+            continue;
+        }
+
+        const occEl = card.querySelector(
+            '.entity-result__primary-subtitle, .entity-result__summary, .artdeco-entity-lockup__subtitle, .base-search-card__subtitle'
+        );
+        let headline = occEl ? (occEl.innerText || occEl.textContent || '').trim() : '';
+        if (!headline) {
+            const lines = cardText.split('\n').map(l => l.trim()).filter(l => l.length > 3 && l.length < 150);
+            for (const l of lines) {
+                const low = l.toLowerCase();
+                if (low.includes('connect') || low.includes('connection') || low.includes('result') || low.includes('degree')) continue;
+                headline = l;
+                break;
+            }
+        }
+
+        const quality = evaluateCandidateQuality(headline, cardText);
+        if (!quality) continue;
+
+        const count = extractCount(cardText);
+
+        const nameEl = card.querySelector(
+            '.entity-result__title-text a, .entity-result__title-text, span[aria-hidden="true"], h3, a[href*="/in/"]'
+        );
+        let name = nameEl ? (nameEl.innerText || nameEl.textContent || '').trim().split('\n')[0] : 'Tech Professional';
+        if (!name || name.length > 50) name = 'Tech Professional';
+
+        let connectBtn = null;
+        const buttons = card.querySelectorAll('button, [role="button"], a.artdeco-button');
+        for (const b of buttons) {
+            if (isConnectButton(b)) {
+                connectBtn = b;
+                break;
+            }
+        }
+
+        tagIdx++;
+        const cardTag = 'ac-srch-card-' + tagIdx;
+        let btnTag = null;
+        card.setAttribute('data-ac-card', cardTag);
+        if (connectBtn) {
+            btnTag = 'ac-srch-btn-' + tagIdx;
+            connectBtn.setAttribute('data-ac-btn', btnTag);
+        }
+
+        let finalScore = quality.score + (count >= 50 ? 15 : 0) + (connectBtn ? 10 : 0);
+
+        candidateMap.set(cleanUrl, {
+            cardTag: cardTag,
+            btnTag: btnTag,
+            url: cleanUrl,
+            name: name,
+            headline: headline,
+            role_category: quality.category,
+            role_label: quality.roleLabel,
+            is_big_tech: quality.isBigTech,
+            quality_score: finalScore,
+            mutual_count: count
+        });
+    }
+
+    const candidates = Array.from(candidateMap.values());
+    candidates.sort((a, b) => b.quality_score - a.quality_score);
+    return candidates;
+})()
+"""
+
 
 async def send_candidate_invitation(page: Page, cand: Dict[str, Any]) -> str:
     """
@@ -681,38 +888,180 @@ async def send_candidate_invitation(page: Page, cand: Dict[str, Any]) -> str:
     return "SUCCESS"
 
 
+async def auto_send_search_invitations(
+    page: Page,
+    profile_id: str,
+    max_search_invitations: int = 15
+) -> int:
+    """
+    Automates sending connection invitations directly from LinkedIn Search targeting:
+    1. High-Profile Tech Leaders (VP of Engineering, Director of Engineering, CTO, Tech Founder)
+    2. Tech Insiders (Principal/Staff Software Engineers, Distinguished Engineers, Tech Leads)
+    3. Tech Companies HRs (Technical Recruiters, Head of Talent, Talent Acquisition)
+    Up to max_search_invitations (typically 50% of the profile's daily cap limit).
+    """
+    profile = await db.get_profile(profile_id)
+    daily_cap = profile.get("daily_limit", 30) if profile else 30
+    today_str = datetime.now().strftime("%Y-%m-%d")
+
+    counts = await db.get_today_method_counts(profile_id, today_str)
+    total_sent_today = counts["total"]
+    search_sent_today = counts["search"]
+
+    if total_sent_today >= daily_cap:
+        logger.info(f"🎯 Full daily cap limit ({total_sent_today}/{daily_cap}) has already been sent today for profile '{profile_id}'. Stopping search.")
+        return 0
+
+    if search_sent_today >= max_search_invitations:
+        logger.info(f"🎯 Search method quota ({search_sent_today}/{max_search_invitations}) has already been reached today for profile '{profile_id}'. Stopping search.")
+        return 0
+
+    needed_search = min(max_search_invitations - search_sent_today, daily_cap - total_sent_today)
+    logger.info(
+        f"⚡ Starting LinkedIn Direct Search auto-send for '{profile_id}': "
+        f"Already sent via Search today: {search_sent_today}/{max_search_invitations}. "
+        f"Target: Send {needed_search} invitations to High-Profile Tech Leaders, Tech Insiders & Tech HRs..."
+    )
+
+    sent_this_session = 0
+    already_sent = await db.get_sent_urls_for_profile(profile_id)
+    attempted_urls = set(u.rstrip("/") for u in already_sent)
+
+    # Shuffle query pools to obtain a rich, balanced mix across Leaders, Insiders, and HRs
+    shuffled_queries = list(SEARCH_QUERY_POOLS)
+    random.shuffle(shuffled_queries)
+
+    for query in shuffled_queries:
+        if total_sent_today >= daily_cap or search_sent_today >= max_search_invitations:
+            break
+
+        # Search across pages 1 to 3
+        for page_num in range(1, 4):
+            if total_sent_today >= daily_cap or search_sent_today >= max_search_invitations:
+                break
+
+            encoded_query = quote(query)
+            search_url = f"https://www.linkedin.com/search/results/people/?keywords={encoded_query}&origin=GLOBAL_SEARCH_HEADER&page={page_num}"
+            logger.info(f"⚡ [LinkedIn Search] Searching: {query} (Page {page_num})")
+
+            try:
+                await page.goto(search_url, wait_until="domcontentloaded", timeout=45000)
+                await asyncio.sleep(2.0)
+
+                # Scroll down smoothly to ensure dynamic result cards render
+                await page.mouse.wheel(0, 800)
+                await asyncio.sleep(1.0)
+                await page.mouse.wheel(0, 800)
+                await asyncio.sleep(0.8)
+
+                candidates = await page.evaluate(SCRIPT_SCAN_SEARCH_CANDIDATES)
+                new_cands = [c for c in candidates if c.get("url", "").rstrip("/") not in attempted_urls]
+
+                if not new_cands:
+                    logger.info(f"No new candidates on search page {page_num} for query: {query}")
+                    continue
+
+                leaders_count = sum(1 for c in new_cands if c.get("role_category") == "TECH_LEADER")
+                insiders_count = sum(1 for c in new_cands if c.get("role_category") == "TECH_INSIDER")
+                hrs_count = sum(1 for c in new_cands if c.get("role_category") == "TECH_HR")
+                swe_count = sum(1 for c in new_cands if c.get("role_category") == "SOFTWARE_ENGINEER")
+
+                logger.info(
+                    f"Found {len(new_cands)} verified quality candidates on Search page {page_num} "
+                    f"({leaders_count} Tech Leaders, {insiders_count} Tech Insiders, {hrs_count} Tech HRs, {swe_count} SWEs)"
+                )
+
+                for cand in new_cands:
+                    if total_sent_today >= daily_cap or search_sent_today >= max_search_invitations:
+                        break
+
+                    cand_url = cand.get("url", "").rstrip("/")
+                    if cand_url in attempted_urls:
+                        continue
+                    attempted_urls.add(cand_url)
+
+                    status = "FAILED"
+                    # If candidate has direct Connect button on the search card, click it directly
+                    if cand.get("btnTag"):
+                        status = await send_candidate_invitation(page, cand)
+
+                    # If direct click on search card wasn't available or failed, navigate to profile
+                    if status not in ("SUCCESS", "WEEKLY_LIMIT"):
+                        logger.info(f"Direct card click unavailable. Navigating to profile: {cand['name']} ({cand_url})...")
+                        try:
+                            step_res = await execute_interaction_step(page, cand_url)
+                            if step_res.get("success"):
+                                status = "SUCCESS"
+                        except Exception as step_err:
+                            logger.debug(f"Profile interaction error: {step_err}")
+
+                    if status == "WEEKLY_LIMIT":
+                        logger.warning(f"Stopping search auto-send: LinkedIn weekly invitation limit reached. Total today: {total_sent_today}/{daily_cap}")
+                        return sent_this_session
+
+                    if status == "SUCCESS":
+                        await db.record_sent_connection(
+                            profile_id=profile_id,
+                            target_url=cand_url,
+                            mutual_count=cand.get("mutual_count", 0),
+                            name=cand.get("name"),
+                            role_label=cand.get("role_label"),
+                            method="search"
+                        )
+                        total_sent_today += 1
+                        search_sent_today += 1
+                        sent_this_session += 1
+                        role_tag = f" [{cand.get('role_label', 'Tech Leader / HR')}]"
+                        logger.info(f"✓ [{search_sent_today}/{max_search_invitations} Search today | {total_sent_today}/{daily_cap} Total] Sent invitation to {cand['name']}{role_tag}")
+
+                        if total_sent_today >= daily_cap or search_sent_today >= max_search_invitations:
+                            break
+
+                        cooldown = random.uniform(1.2, 2.2)
+                        await asyncio.sleep(cooldown)
+
+            except Exception as e:
+                logger.error(f"Error during search for '{query}' on page {page_num}: {e}", exc_info=True)
+
+    logger.info(f"⚡ Search method run completed for '{profile_id}': Sent {sent_this_session} invitations (Search total today: {search_sent_today}/{max_search_invitations}).")
+    return sent_this_session
+
+
 async def auto_send_network_invitations(
     page: Page, 
     profile_id: str, 
     min_mutual: int = 50, 
-    max_invitations: int = 30
+    max_invitations: int = 15
 ) -> int:
     """
-    Automates sending connection requests rapidly until the profile's full daily cap
-    limit is reached (default 30/day). Strictly targets high-quality profiles:
-    1. Tech Founders (Founders, Co-Founders, CEO/CTO of tech startups/companies)
-    2. HR & Technical Recruiters at Big Tech or Small Tech companies
-    3. Current Software Engineers & Technical Leaders at Good Tech companies
-    Prioritizing candidates with >= 100 mutual connections and big tech experience.
+    Automates sending connection requests on My Network rapidly to profiles having
+    >= 100 mutual connections (prioritizing Recent Activity). Targets high-quality profiles:
+    Tech Founders, HR/Recruiters, Software Engineers.
+    Up to max_invitations (typically 50% of the profile's daily cap limit).
     """
     profile = await db.get_profile(profile_id)
-    daily_cap = profile.get("daily_limit", max_invitations) if profile else max_invitations
+    daily_cap = profile.get("daily_limit", 30) if profile else 30
     today_str = datetime.now().strftime("%Y-%m-%d")
 
-    already_sent_today = await db.get_today_sent_count(profile_id, today_str)
-    if already_sent_today >= daily_cap:
-        logger.info(f"🎯 Full daily cap limit ({already_sent_today}/{daily_cap}) has already been sent today for profile '{profile_id}'. Stopping.")
+    counts = await db.get_today_method_counts(profile_id, today_str)
+    total_sent_today = counts["total"]
+    network_sent_today = counts["network"]
+
+    if total_sent_today >= daily_cap:
+        logger.info(f"🎯 Full daily cap limit ({total_sent_today}/{daily_cap}) has already been sent today for profile '{profile_id}'. Stopping network run.")
         return 0
 
-    remaining_needed = daily_cap - already_sent_today
+    if network_sent_today >= max_invitations:
+        logger.info(f"🎯 Network quota ({network_sent_today}/{max_invitations}) has already been reached today for profile '{profile_id}'. Stopping network run.")
+        return 0
+
+    remaining_needed = min(max_invitations - network_sent_today, daily_cap - total_sent_today)
     logger.info(
         f"⚡ Starting rapid quality auto-send for '{profile_id}' on My Network: "
-        f"Already sent today: {already_sent_today}/{daily_cap}. "
-        f"Goal: Send remaining {remaining_needed} invitations to reach full daily cap of {daily_cap} "
-        f"(Targeting: Tech Founders, HR/Recruiters, Software Engineers at Good Tech)..."
+        f"Already sent via Network today: {network_sent_today}/{max_invitations}. "
+        f"Goal: Send remaining {remaining_needed} invitations (Targeting: >100 mutual connections, Tech Founders, HR/Recruiters, SWEs)..."
     )
 
-    total_sent_today = already_sent_today
     sent_this_session = 0
 
     # Pre-populate attempted URLs from database so we never duplicate
@@ -724,7 +1073,7 @@ async def auto_send_network_invitations(
     if pending_in_db:
         logger.info(f"Processing {len(pending_in_db)} already queued pending targets...")
         for item in pending_in_db:
-            if total_sent_today >= daily_cap:
+            if total_sent_today >= daily_cap or network_sent_today >= max_invitations:
                 break
             item_id = item["id"]
             target_url = item["target_url"]
@@ -736,15 +1085,16 @@ async def auto_send_network_invitations(
                 if res.get("success"):
                     await db.update_queue_item_status(item_id, "completed", error_message="Invitation sent automatically")
                     total_sent_today += 1
+                    network_sent_today += 1
                     sent_this_session += 1
-                    logger.info(f"✓ [{total_sent_today}/{daily_cap} today] Sent invitation to {target_url}")
+                    logger.info(f"✓ [{network_sent_today}/{max_invitations} Network today | {total_sent_today}/{daily_cap} Total] Sent invitation to {target_url}")
                 else:
                     await db.update_queue_item_status(item_id, "failed", error_message=res.get("message"))
             except Exception as e:
                 logger.error(f"Failed sending to {target_url}: {e}")
                 await db.update_queue_item_status(item_id, "failed", error_message=str(e)[:200])
 
-            if total_sent_today < daily_cap:
+            if total_sent_today < daily_cap and network_sent_today < max_invitations:
                 await asyncio.sleep(random.uniform(1.0, 1.8))
 
     # Step 2: Recommendations on My Network (/mynetwork/grow/ & /mynetwork/)
@@ -754,7 +1104,7 @@ async def auto_send_network_invitations(
     ]
 
     for net_url in network_urls:
-        if total_sent_today >= daily_cap:
+        if total_sent_today >= daily_cap or network_sent_today >= max_invitations:
             break
         try:
             curr_url = page.url.lower().rstrip("/")
@@ -800,8 +1150,8 @@ async def auto_send_network_invitations(
             # Loop up to 60 scroll/pagination passes on the Network page
             consecutive_empty_scrolls = 0
             for scroll_idx in range(60):
-                if total_sent_today >= daily_cap:
-                    logger.info(f"🎉 Full daily cap limit ({total_sent_today}/{daily_cap}) reached! Stopping auto-send.")
+                if total_sent_today >= daily_cap or network_sent_today >= max_invitations:
+                    logger.info(f"🎯 Network target reached ({network_sent_today}/{max_invitations} Network | {total_sent_today}/{daily_cap} Total).")
                     break
 
                 candidates = await page.evaluate(SCRIPT_SCAN_CANDIDATES)
@@ -819,7 +1169,7 @@ async def auto_send_network_invitations(
                     )
 
                     for cand in new_cands:
-                        if total_sent_today >= daily_cap:
+                        if total_sent_today >= daily_cap or network_sent_today >= max_invitations:
                             break
                         cand_url = cand.get("url", "").rstrip("/")
                         if cand_url in attempted_urls:
@@ -828,23 +1178,24 @@ async def auto_send_network_invitations(
 
                         status = await send_candidate_invitation(page, cand)
                         if status == "WEEKLY_LIMIT":
-                            logger.warning(f"Stopping auto-send: LinkedIn weekly invitation limit reached. Total sent today: {total_sent_today}/{daily_cap}")
+                            logger.warning(f"Stopping network auto-send: LinkedIn weekly invitation limit reached. Total sent today: {total_sent_today}/{daily_cap}")
                             return sent_this_session
                         if status == "SUCCESS":
                             await db.record_sent_connection(
-                                profile_id, 
-                                cand_url, 
-                                cand["mutual_count"], 
-                                cand["name"],
-                                role_label=cand.get("role_label")
+                                profile_id=profile_id, 
+                                target_url=cand_url, 
+                                mutual_count=cand["mutual_count"], 
+                                name=cand["name"],
+                                role_label=cand.get("role_label"),
+                                method="network"
                             )
                             total_sent_today += 1
+                            network_sent_today += 1
                             sent_this_session += 1
                             sec_tag = " [Recent Activity]" if cand.get("is_recent_activity") else ""
                             role_tag = f" [{cand.get('role_label', 'Quality Target')}]"
-                            logger.info(f"✓ [{total_sent_today}/{daily_cap} today] Sent invitation to {cand['name']} ({cand['mutual_count']} connections){role_tag}{sec_tag}")
-                            if total_sent_today >= daily_cap:
-                                logger.info(f"🎉 Target reached: {total_sent_today}/{daily_cap} daily cap invitations sent today!")
+                            logger.info(f"✓ [{network_sent_today}/{max_invitations} Network today | {total_sent_today}/{daily_cap} Total] Sent invitation to {cand['name']} ({cand['mutual_count']} connections){role_tag}{sec_tag}")
+                            if total_sent_today >= daily_cap or network_sent_today >= max_invitations:
                                 break
                             cooldown = random.uniform(1.0, 1.8)
                             await asyncio.sleep(cooldown)
@@ -903,14 +1254,116 @@ async def auto_send_network_invitations(
         except Exception as e:
             logger.error(f"Error on {net_url}: {e}", exc_info=True)
 
-    if total_sent_today >= daily_cap:
-        await db.record_daily_auto_run_completed(profile_id, today_str)
-        logger.info(f"🎉 Fully completed all daily cap invitations ({total_sent_today}/{daily_cap}) for '{profile_id}'! Marked as completed for today.")
-    else:
-        logger.warning(f"⚠️ Reached end of network pages: {total_sent_today}/{daily_cap} invitations sent today for '{profile_id}'.")
-
-    logger.info(f"⚡ Rapid auto-send completed for '{profile_id}': Sent {sent_this_session} in this run (Total today: {total_sent_today}/{daily_cap}).")
+    logger.info(f"⚡ Rapid My Network auto-send completed for '{profile_id}': Sent {sent_this_session} in this run (Network today: {network_sent_today}/{max_invitations} | Total today: {total_sent_today}/{daily_cap}).")
     return sent_this_session
+
+
+async def auto_send_dual_strategy_invitations(
+    page: Page, 
+    profile_id: str, 
+    daily_cap: int = 30
+) -> int:
+    """
+    Orchestrates the 50/50 dual connection dispatch strategy:
+    - 50% via Direct LinkedIn Search (High-Profile Tech Leaders, Tech Insiders, Tech HRs)
+    - 50% via My Network (100+ Mutual Connections)
+    Ensures the profile fulfills its exact daily cap limit (default 30/day).
+    """
+    profile = await db.get_profile(profile_id)
+    daily_limit = profile.get("daily_limit", daily_cap) if profile else daily_cap
+    today_str = datetime.now().strftime("%Y-%m-%d")
+
+    counts = await db.get_today_method_counts(profile_id, today_str)
+    already_sent_today = counts["total"]
+    search_sent_today = counts["search"]
+    network_sent_today = counts["network"]
+
+    if already_sent_today >= daily_limit:
+        logger.info(
+            f"🎯 Full daily cap limit ({already_sent_today}/{daily_limit}) has already been sent today for profile '{profile_id}' "
+            f"(Search: {search_sent_today}, Network: {network_sent_today}). Stopping."
+        )
+        return 0
+
+    target_search_quota = daily_limit // 2
+    target_network_quota = daily_limit - target_search_quota
+
+    logger.info(
+        f"⚡ Starting 50/50 Dual-Strategy Dispatch for '{profile_id}':\n"
+        f"   - Daily Cap: {daily_limit} invitations\n"
+        f"   - 50% Search Quota: {target_search_quota} (Sent today: {search_sent_today})\n"
+        f"   - 50% Network Quota: {target_network_quota} (Sent today: {network_sent_today})\n"
+        f"   - Total Sent Today: {already_sent_today}/{daily_limit}"
+    )
+
+    total_sent_this_session = 0
+
+    # Phase 1: Search Method (50% quota: High-Profile Tech Leaders, Tech Insiders, Tech HRs)
+    if search_sent_today < target_search_quota and already_sent_today < daily_limit:
+        search_needed = target_search_quota - search_sent_today
+        logger.info(f"🚀 [Phase 1: Search Method] Dispatching up to {search_needed} invitations to Tech Leaders, Insiders & HRs via LinkedIn Search...")
+        sent_search = await auto_send_search_invitations(
+            page=page,
+            profile_id=profile_id,
+            max_search_invitations=target_search_quota
+        )
+        total_sent_this_session += sent_search
+
+    # Refresh counts
+    counts = await db.get_today_method_counts(profile_id, today_str)
+    already_sent_today = counts["total"]
+    network_sent_today = counts["network"]
+
+    # Phase 2: Network Method (50% quota: >100 Mutual Connections)
+    if network_sent_today < target_network_quota and already_sent_today < daily_limit:
+        net_needed = target_network_quota - network_sent_today
+        logger.info(f"🚀 [Phase 2: Network Method] Dispatching up to {net_needed} invitations to profiles with >100 mutual connections on My Network...")
+        sent_net = await auto_send_network_invitations(
+            page=page,
+            profile_id=profile_id,
+            min_mutual=50,
+            max_invitations=target_network_quota
+        )
+        total_sent_this_session += sent_net
+
+    # Refresh counts
+    counts = await db.get_today_method_counts(profile_id, today_str)
+    already_sent_today = counts["total"]
+
+    # Phase 3: Remainder fulfillment if either method had a shortage of candidates
+    if already_sent_today < daily_limit:
+        remainder_needed = daily_limit - already_sent_today
+        logger.info(f"🔄 [Phase 3: Remainder Fulfillment] Still need {remainder_needed} invitations to reach full daily cap of {daily_limit}. Running supplemental dispatch...")
+        sent_supp = await auto_send_search_invitations(
+            page=page,
+            profile_id=profile_id,
+            max_search_invitations=daily_limit
+        )
+        total_sent_this_session += sent_supp
+
+        counts = await db.get_today_method_counts(profile_id, today_str)
+        already_sent_today = counts["total"]
+        if already_sent_today < daily_limit:
+            sent_supp_net = await auto_send_network_invitations(
+                page=page,
+                profile_id=profile_id,
+                min_mutual=50,
+                max_invitations=daily_limit
+            )
+            total_sent_this_session += sent_supp_net
+
+    counts = await db.get_today_method_counts(profile_id, today_str)
+    already_sent_today = counts["total"]
+    search_sent_today = counts["search"]
+    network_sent_today = counts["network"]
+
+    if already_sent_today >= daily_limit:
+        await db.record_daily_auto_run_completed(profile_id, today_str)
+        logger.info(f"🎉 Fully completed all daily cap invitations ({already_sent_today}/{daily_limit}) for '{profile_id}'! (Search: {search_sent_today}, Network: {network_sent_today}). Marked as completed for today.")
+    else:
+        logger.warning(f"⚠️ Dispatch finished with {already_sent_today}/{daily_limit} invitations sent today for '{profile_id}' (Search: {search_sent_today}, Network: {network_sent_today}).")
+
+    return total_sent_this_session
 
 
 
@@ -1020,18 +1473,18 @@ async def open_interactive_session(
             else:
                 remaining_needed = daily_limit - already_sent_today
                 logger.info(
-                    f"Logged in! Starting FAST automatic quality connection invitations for '{profile_id}' "
-                    f"(Already sent today: {already_sent_today}/{daily_limit}, Remaining: {remaining_needed}, Target: Tech Founders, HR/Recruiters, Software Engineers at Good Tech)..."
+                    f"Logged in! Starting FAST automatic 50/50 quality connection invitations for '{profile_id}' "
+                    f"(Already sent today: {already_sent_today}/{daily_limit}, Remaining: {remaining_needed}, "
+                    f"Target: 50% Search [Tech Leaders, Insiders, HRs] + 50% Network [>100 Mutual Connections])..."
                 )
                 await db.update_profile_status(profile_id, "running")
                 worker_page = page if (page and not page.is_closed()) else await context.new_page()
                 await worker_page.bring_to_front()
 
-                sent = await auto_send_network_invitations(
+                sent = await auto_send_dual_strategy_invitations(
                     page=worker_page,
                     profile_id=profile_id,
-                    min_mutual=50,
-                    max_invitations=daily_limit
+                    daily_cap=daily_limit
                 )
                 logger.info(f"⚡ Completed sending {sent} connection invitations for '{profile_id}' in this run.")
                 await asyncio.sleep(2)

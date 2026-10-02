@@ -88,16 +88,23 @@ Open your browser at **[http://127.0.0.1:8000](http://127.0.0.1:8000)** to acces
    - Log into your LinkedIn account normally (complete 2FA / CAPTCHA if prompted).
    - **Automatic Invitation Sending**: Upon detecting login, the system automatically opens the "My Network" page in a new tab, locates all recommendation cards with **more than 100 mutual connections**, and **automatically clicks "Connect" and sends connection requests** with polite human delays!
 
-3. **24/7 Daily Auto-Pilot (Runs Daily Without Permission)**:
+3. **24/7 Daily Auto-Pilot with 50/50 Dual Strategy**:
    - Built directly into the application lifespan via `scheduler.py`.
    - Runs continuously in the background, checking every 60 seconds.
-   - Every day at the configured schedule hour (e.g. 09:00 AM local time), it automatically triggers the My Network connection flow for active profiles without asking for operator permission.
-   - Automatically navigates to My Network (`https://www.linkedin.com/mynetwork/grow/`), finds quality candidates (prioritizing **Recent Activity** and **>= 100 mutual connections**), and rapidly clicks **"Connect"** up to the full daily cap (e.g. 30/day).
-   - **Quality Targeting Engine**:
-     - **Tech Founders**: Founders, Co-Founders, CEO/CTO of tech startups and companies.
-     - **HR & Recruiters**: Talent Acquisition, Technical Recruiters, People Ops at Big Tech or Small Tech.
-     - **Software Engineers**: SWE, SDE, Tech Leads, Engineering Managers, AI/ML Engineers at good tech companies.
-   - **Guaranteed Daily Cap Completion**: Tracks actual invitations sent today in SQLite and continuously paginates/clicks "Show more results" until the daily cap (e.g. 30/30) is reached.
+   - Every day at the configured schedule hour (e.g. 09:00 AM local time), it automatically runs the **50/50 Dual Strategy** without asking for operator permission:
+     - **Method 1 (50% via LinkedIn Direct Search)**:
+       - Navigates to LinkedIn People Search with rotating high-intent queries:
+         1. **High-Profile Tech Leaders**: `"VP of Engineering"`, `"Director of Engineering"`, `"Head of Engineering"`, `"CTO"`, `"Tech Founder"`.
+         2. **Tech Insiders**: `"Staff Software Engineer"`, `"Principal Software Engineer"`, `"Distinguished Engineer"`, `"Tech Lead"`.
+         3. **Tech Companies HRs**: `"Technical Recruiter"`, `"Lead Technical Recruiter"`, `"Head of Talent"`, `"Talent Acquisition"`.
+       - Scans search cards, detects direct Connect buttons (or navigates to profile), handles "Send without a note" modals, and dispatches 50% of the daily limit (~15/day).
+     - **Method 2 (50% via My Network Recommendations)**:
+       - Navigates to My Network (`https://www.linkedin.com/mynetwork/grow/`).
+       - Finds candidates having **>100 mutual connections** (prioritizing **Recent Activity** and verified tech roles).
+       - Automatically sends 50% of the daily limit (~15/day).
+     - **Smart Remainder Fulfillment**:
+       - If either method exhausts available candidates on a given pass, the supplemental method automatically steps in to ensure the full daily cap (e.g. 30/30) is 100% achieved every single day.
+   - **Guaranteed Daily Cap Completion**: Tracks actual invitations sent today in SQLite split by method (`today_search_count` and `today_network_count`).
    - Records the run date in SQLite so it runs at most once per calendar day.
    - **Dashboard Controls**:
      - Toggle Auto-Pilot on/off for any profile with `⏸️ Pause Auto-Pilot` / `⚡ Auto-Pilot ON`.

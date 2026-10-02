@@ -159,11 +159,11 @@
                         <div class="flex items-center space-x-2">
                             <h2 class="text-sm font-bold text-white tracking-wide">Daily Automated Auto-Pilot</h2>
                             <span class="px-2 py-0.5 text-[10px] font-bold uppercase rounded-full bg-emerald-500/20 text-emerald-300 border border-emerald-500/30">
-                                Active 24/7 (Unattended Dispatches)
+                                50/50 Dual Strategy Active
                             </span>
                         </div>
                         <p class="text-xs text-gray-400 mt-0.5">
-                            Automatically runs daily in background without asking for manual permission. Finds candidates on My Network having <span class="text-cyan-300 font-semibold">&gt;=100 mutual connections</span> (prioritizing <span class="text-indigo-300 font-medium">Recent Activity</span>) and sends invitations up to your daily cap.
+                            Automatically runs daily in background without asking for manual permission. Sends <span class="text-cyan-300 font-semibold">50% via LinkedIn Search</span> (High-Profile Tech Leaders, Tech Insiders & Tech HRs) and <span class="text-emerald-300 font-semibold">50% via My Network</span> (&gt;100 Mutual Connections) up to your daily cap limit.
                         </p>
                     </div>
                 </div>
@@ -367,6 +367,18 @@
                             {% set pct = [(((p.today_sent_count or 0) / p.daily_limit) * 100)|round|int, 100]|min %}
                             <div class="w-full bg-gray-950/80 rounded-full h-1.5 overflow-hidden border border-gray-800/80">
                                 <div class="h-full rounded-full transition-all duration-500 {% if pct >= 100 %}bg-gradient-to-r from-emerald-500 to-teal-400{% else %}bg-gradient-to-r from-amber-500 to-indigo-500{% endif %}" style="width: {{ pct }}%;"></div>
+                            </div>
+
+                            <!-- 50/50 Split Method Breakdown -->
+                            <div class="flex items-center justify-between text-[10px] text-gray-400 px-0.5 pt-0.5">
+                                <span class="flex items-center space-x-1" title="High-Profile Tech Leaders, Insiders & HRs via LinkedIn Search">
+                                    <span class="w-1.5 h-1.5 rounded-full bg-cyan-400"></span>
+                                    <span>Search: <strong class="text-cyan-300 font-semibold">{{ p.today_search_count or 0 }}</strong>/{{ p.daily_limit // 2 }}</span>
+                                </span>
+                                <span class="flex items-center space-x-1" title=">100 Mutual Connections on My Network">
+                                    <span class="w-1.5 h-1.5 rounded-full bg-emerald-400"></span>
+                                    <span>Network: <strong class="text-emerald-300 font-semibold">{{ p.today_network_count or 0 }}</strong>/{{ p.daily_limit - (p.daily_limit // 2) }}</span>
+                                </span>
                             </div>
 
                             <!-- Progress / Queue Pill Counters -->
@@ -589,11 +601,16 @@
                                         {% endif %}
                                     </td>
                                     <td class="py-3 px-3">
-                                        <div class="text-[11px] text-gray-400 truncate max-w-[180px]" title="{{ item.error_message or item.message_text or 'No custom note' }}">
+                                        <div class="text-[11px] text-gray-400 truncate max-w-[240px]" title="{{ item.error_message or item.message_text or 'No custom note' }}">
                                             {% if item.error_message %}
                                             <span class="text-rose-400 font-medium">{{ item.error_message }}</span>
                                             {% elif item.message_text %}
-                                            <span class="text-gray-300 italic">"{{ item.message_text }}"</span>
+                                                {% if 'LinkedIn Search' in item.message_text or '[Search]' in item.message_text %}
+                                                <span class="px-1.5 py-0.5 rounded text-[9px] font-semibold bg-cyan-950/80 text-cyan-300 border border-cyan-800/70 mr-1 shadow-sm">Search</span>
+                                                {% elif 'mutual' in item.message_text %}
+                                                <span class="px-1.5 py-0.5 rounded text-[9px] font-semibold bg-emerald-950/80 text-emerald-300 border border-emerald-800/70 mr-1 shadow-sm">Network</span>
+                                                {% endif %}
+                                                <span class="text-gray-300">{{ item.message_text }}</span>
                                             {% else %}
                                             <span class="text-gray-600">None</span>
                                             {% endif %}

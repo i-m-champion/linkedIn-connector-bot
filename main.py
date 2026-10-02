@@ -239,8 +239,9 @@ async def trigger_auto_send_session(
     background_tasks: BackgroundTasks
 ):
     """
-    Directly navigates to LinkedIn 'My Network' and automatically clicks 'Connect'
-    to send connection invitations to everyone having > 100 mutual connections.
+    Triggers the 50/50 dual-strategy connection session:
+    - 50% via LinkedIn Search (High-Profile Tech Leaders, Tech Insiders, Tech HRs)
+    - 50% via My Network (100+ Mutual Connections)
     """
     profile = await db.get_profile(target_profile_id)
     if not profile:
@@ -261,7 +262,7 @@ async def trigger_auto_send_session(
     )
 
     return RedirectResponse(
-        url=f"/?success=Auto-sending+connection+invitations+on+My+Network+for+{target_profile_id}...", 
+        url=f"/?success=Auto-sending+50/50+connection+invitations+(Search+&+Network)+for+{target_profile_id}...", 
         status_code=303
     )
 

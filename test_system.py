@@ -123,7 +123,61 @@ class TestDatabaseLayer(unittest.IsolatedAsyncioTestCase):
         due_off = await db.get_auto_pilot_due_profiles(current_hour=10, today_str="2026-10-03")
         self.assertFalse(any(p["id"] == ap_test_id for p in due_off))
 
-        await db.delete_profile(ap_test_id)
+        # Test 50/50 Dual Strategy method tracking
+        dual_test_id = "test_dual_profile"
+        await db.delete_profile(dual_test_id)
+        await db.create_profile(dual_test_id, label="Dual Test Profile", daily_limit=30)
+
+        # Record 2 via Search
+        await db.record_sent_connection(
+            dual_test_id, 
+            "https://www.linkedin.com/in/vp-eng-stripe", 
+            mutual_count=0, 
+            name="VP Eng Stripe", 
+            role_label="High-Profile Tech Leader", 
+            method="search"
+        )
+        await db.record_sent_connection(
+            dual_test_id, 
+            "https://www.linkedin.com/in/tech-recruiter-meta", 
+            mutual_count=0, 
+            name="Recruiter Meta", 
+            role_label="Tech Company HR", 
+            method="search"
+        )
+
+        # Record 2 via Network
+        await db.record_sent_connection(
+            dual_test_id, 
+            "https://www.linkedin.com/in/founder-ai", 
+            mutual_count=130, 
+            name="Founder AI", 
+            role_label="Tech Founder", 
+            method="network"
+        )
+        await db.record_sent_connection(
+            dual_test_id, 
+            "https://www.linkedin.com/in/staff-swe-google", 
+            mutual_count=115, 
+            name="Staff SWE Google", 
+            role_label="Software Engineer", 
+            method="network"
+        )
+
+        counts = await db.get_today_method_counts(dual_test_id)
+        self.assertEqual(counts["total"], 4)
+        self.assertEqual(counts["search"], 2)
+        self.assertEqual(counts["network"], 2)
+
+        # Check get_all_profiles has method breakdown fields
+        all_profs = await db.get_all_profiles()
+        dual_prof = next((p for p in all_profs if p["id"] == dual_test_id), None)
+        self.assertIsNotNone(dual_prof)
+        self.assertEqual(dual_prof["today_sent_count"], 4)
+        self.assertEqual(dual_prof["today_search_count"], 2)
+        self.assertEqual(dual_prof["today_network_count"], 2)
+
+        await db.delete_profile(dual_test_id)
 
         # Cleanup
         deleted = await db.delete_profile(test_id)
@@ -153,7 +207,16 @@ class TestBrowserEngine(unittest.TestCase):
         self.assertIsNone(engine.parse_proxy_settings("   "))
         self.assertIsNone(engine.parse_proxy_settings("http://user:pass@proxy.example.com:8080"))
 
-    def test_playwright_stealth_launch(self):
+    def test_search_query_pools(self):
+        # Verify search query pools cover leaders, insiders, and HRs
+        self.assertGreaterEqual(len(engine.SEARCH_QUERY_POOLS), 4)
+        all_queries = " ".join(engine.SEARCH_QUERY_POOLS).lower()
+        self.assertIn("vp of engineering", all_queries)
+        self.assertIn("recruiter", all_queries)
+        self.assertIn("principal", all_queries)
+        self.assertIn("cto", all_queries)
+
+    def test_playwright_stealth_and_search_script(self):
         async def run_test():
             from playwright.async_api import async_playwright
             async with async_playwright() as pw:
@@ -168,11 +231,38 @@ class TestBrowserEngine(unittest.TestCase):
                 webdriver_val = await page.evaluate("() => navigator.webdriver")
                 languages_val = await page.evaluate("() => navigator.languages")
                 has_chrome = await page.evaluate("() => typeof window.chrome === 'object'")
-                await context.close()
 
                 self.assertIsNone(webdriver_val)
                 self.assertIn("en-US", languages_val)
                 self.assertTrue(has_chrome)
+
+                # Set up HTML mock of LinkedIn search results
+                mock_html = """
+                <html><body>
+                    <ul class="search-results-container">
+                        <li class="reusable-search__result-container">
+                            <a class="app-aware-link" href="https://www.linkedin.com/in/john-techleader">John Leader</a>
+                            <div class="entity-result__primary-subtitle">VP of Engineering at Google</div>
+                            <button aria-label="Invite John to connect">Connect</button>
+                        </li>
+                        <li class="reusable-search__result-container">
+                            <a class="app-aware-link" href="https://www.linkedin.com/in/sarah-recruiter">Sarah HR</a>
+                            <div class="entity-result__primary-subtitle">Technical Recruiter at Stripe</div>
+                            <button aria-label="Invite Sarah to connect">Connect</button>
+                        </li>
+                    </ul>
+                </body></html>
+                """
+                await page.set_content(mock_html)
+
+                # Evaluate SCRIPT_SCAN_SEARCH_CANDIDATES
+                cands = await page.evaluate(engine.SCRIPT_SCAN_SEARCH_CANDIDATES)
+                self.assertEqual(len(cands), 2)
+                self.assertTrue(any(c["role_category"] == "TECH_LEADER" for c in cands))
+                self.assertTrue(any(c["role_category"] == "TECH_HR" for c in cands))
+                self.assertIsNotNone(cands[0]["btnTag"])
+
+                await context.close()
 
                 # Verify profile directory created
                 test_dir = os.path.join(engine.PROFILES_DIR, "smoke_pw_test")
