@@ -793,17 +793,30 @@ SCRIPT_SCAN_SENT_INVITATIONS = r"""
     const seen = new Set();
     let tagIdx = Date.now();
 
-    const cardSelectors = [
-        'li.invitation-card',
-        'div.invitation-card',
-        '[data-view-name*="invitation"]',
-        'ul.mn-invitation-list li',
-        '.mn-invitation-list__item',
-        'li:has(button)'
-    ];
-    const cards = document.querySelectorAll(cardSelectors.join(', '));
+    // Find all leaf elements representing a Withdraw action
+    const withdrawTriggers = Array.from(document.querySelectorAll('button, a, span')).filter(el => {
+        const txt = (el.innerText || el.textContent || '').trim().toLowerCase();
+        const aria = (el.getAttribute('aria-label') || '').toLowerCase();
+        const isWithdraw = txt === 'withdraw' || aria.includes('withdraw') || txt.includes('withdraw');
+        return isWithdraw && el.children.length === 0;
+    });
 
-    for (const card of cards) {
+    for (const trigger of withdrawTriggers) {
+        const withdrawBtn = trigger.tagName === 'BUTTON' || trigger.tagName === 'A' ? trigger : (trigger.closest('button, a') || trigger);
+
+        // Climb up to find card container holding a LinkedIn profile URL
+        let card = null;
+        let parent = withdrawBtn.parentElement;
+        while (parent && parent !== document.body) {
+            if (parent.querySelector('a[href*="/in/"]')) {
+                card = parent;
+                break;
+            }
+            parent = parent.parentElement;
+        }
+
+        if (!card) continue;
+
         // Extract profile link
         const link = card.querySelector('a.invitation-card__link[href*="/in/"]') || 
                      card.querySelector('a[href*="/in/"]');
@@ -814,26 +827,12 @@ SCRIPT_SCAN_SENT_INVITATIONS = r"""
         const cleanUrl = rawUrl.split('?')[0].split('#')[0].replace(/\/$/, '');
         if (!cleanUrl || !cleanUrl.includes('/in/') || seen.has(cleanUrl)) continue;
 
-        // Find Withdraw button on this card
-        let withdrawBtn = null;
-        const buttons = card.querySelectorAll('button, a[role="button"]');
-        for (const b of buttons) {
-            const txt = (b.innerText || b.textContent || '').trim().toLowerCase();
-            const aria = (b.getAttribute('aria-label') || '').toLowerCase();
-            if (txt.includes('withdraw') || aria.includes('withdraw')) {
-                withdrawBtn = b;
-                break;
-            }
-        }
-        if (!withdrawBtn) continue;
-
-        // Find time sent text
+        // Extract full card text
         const cardText = (card.innerText || card.textContent || '').trim();
-        const timeEl = card.querySelector('time, .time-badge, .invitation-card__time-ago');
-        const timeText = timeEl ? (timeEl.innerText || timeEl.textContent || '').trim() : '';
+        const timeMatch = cardText.match(/\b(?:Sent\s+)?(\d+\s*(?:minute|hour|day|week|month|year)s?\s*ago|\b(?:yesterday|just now))\b/i);
+        const timeText = timeMatch ? timeMatch[0] : '';
 
-        const fullTextForTime = timeText || cardText;
-        if (!isOlderThanOneWeek(fullTextForTime)) {
+        if (!isOlderThanOneWeek(cardText)) {
             continue; // Skip if less than 1 week old
         }
 
@@ -842,7 +841,9 @@ SCRIPT_SCAN_SENT_INVITATIONS = r"""
             '.invitation-card__title, span[aria-hidden="true"], h3, a[href*="/in/"]'
         );
         let name = nameEl ? (nameEl.innerText || nameEl.textContent || '').trim().split('\n')[0] : 'Member';
-        if (!name || name.length > 50) name = 'Member';
+        if (!name || name.length > 50 || name.toLowerCase().includes('withdraw')) {
+            name = (cardText.split('|')[0] || 'Member').trim();
+        }
 
         seen.add(cleanUrl);
         tagIdx++;
@@ -1483,6 +1484,14 @@ async def withdraw_and_resend_stale_invitations(
     try:
         await page.goto(sent_url, wait_until="domcontentloaded", timeout=45000)
         await asyncio.sleep(2.5)
+        # Wait up to 5s for cards or empty state container to hydrate
+        try:
+            await page.wait_for_selector(
+                "li.invitation-card, div.invitation-card, [data-view-name*='invitation'], .mn-invitation-list, div:has-text('No sent invitations'), p:has-text('No sent invitations')",
+                timeout=5000
+            )
+        except Exception:
+            pass
     except Exception as e:
         logger.error(f"Failed navigating to sent invitations manager: {e}")
         return 0
@@ -1505,7 +1514,32 @@ async def withdraw_and_resend_stale_invitations(
         unprocessed = [it for it in stale_items if it.get("url") not in attempted_urls]
 
         if not unprocessed:
-            logger.info(f"No more stale invitations (>1 week old) detected on pass {pass_idx + 1}.")
+            try:
+                diag = await page.evaluate("""() => {
+                    const triggers = Array.from(document.querySelectorAll('button, a, span')).filter(el => {
+                        const txt = (el.innerText || el.textContent || '').trim().toLowerCase();
+                        const aria = (el.getAttribute('aria-label') || '').toLowerCase();
+                        return (txt === 'withdraw' || aria.includes('withdraw') || txt.includes('withdraw')) && el.children.length === 0;
+                    });
+                    const samples = triggers.slice(0, 4).map(tr => {
+                        let btn = tr.tagName === 'BUTTON' || tr.tagName === 'A' ? tr : (tr.closest('button, a') || tr);
+                        let p = btn.parentElement;
+                        let card = null;
+                        while (p && p !== document.body) {
+                            if (p.querySelector('a[href*="/in/"]')) { card = p; break; }
+                            p = p.parentElement;
+                        }
+                        return card ? (card.innerText || '').replace(/\\n+/g, ' | ').slice(0, 100) : 'Card';
+                    });
+                    return {
+                        totalCards: triggers.length,
+                        samples: samples
+                    };
+                }""")
+                logger.info(f"Sent Manager pass {pass_idx + 1}: Found {diag.get('totalCards')} sent invitation(s) on page, but 0 are > 1 week old. Samples: {diag.get('samples')}")
+            except Exception as diag_err:
+                logger.debug(f"Diagnostic error: {diag_err}")
+            logger.info(f"No stale invitations (>1 week old) detected on pass {pass_idx + 1}.")
             # Check if there is a next page button
             try:
                 next_btn = page.locator("button[aria-label='Next'], a.artdeco-pagination__button--next").first
