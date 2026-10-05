@@ -566,307 +566,6 @@ SCRIPT_SCAN_CANDIDATES = r"""
 })()
 """
 
-# Curated search query pools for high-profile tech leaders, tech insiders, and tech HRs
-SEARCH_QUERY_POOLS = [
-    # High-Profile Tech Leaders & Founders
-    '"VP of Engineering" OR "Director of Engineering" OR "Head of Engineering"',
-    '"CTO" OR "Tech Founder" OR "Chief Technology Officer"',
-    # Tech Insiders & Principal/Staff Engineers
-    '"Principal Software Engineer" OR "Staff Software Engineer" OR "Distinguished Engineer"',
-    '"Tech Lead" OR "Lead Software Engineer" OR "Principal Architect"',
-    # Tech Companies HRs & Recruiters
-    '"Technical Recruiter" OR "Lead Technical Recruiter" OR "Head of Talent"',
-    '"Talent Acquisition" OR "Engineering Recruiter" OR "Head of People"',
-]
-
-# Client-side script scanning LinkedIn Search Results specifically targeting:
-# 1. High-Profile Tech Leaders (VP of Engineering, Director of Engineering, CTO, Tech Founder)
-# 2. Tech Insiders (Principal/Staff Software Engineers, Distinguished Engineers, Tech Leads)
-# 3. Tech Companies HRs (Technical Recruiters, Head of Talent, Talent Acquisition)
-SCRIPT_SCAN_SEARCH_CANDIDATES = r"""
-(() => {
-    const r1 = /([\d,]+)\s*\+?\s*(?:others?\s+)?(?:mutual(?:\s+connections?)?|connections?\s+in\s+common|in\s+common|connections?)/i;
-    const r2 = /(?:mutual(?:\s+connections?)?|connections?\s+in\s+common|in\s+common|connections?)[\s:]+([\d,]+)/i;
-    const r3 = /([\d,]+)\s*\+\s*connections?/i;
-
-    function extractCount(text) {
-        if (!text) return 0;
-        const kMatch = text.match(/([\d\.]+)\s*k\+?\s*(?:mutual|connections?)/i);
-        if (kMatch && kMatch[1]) {
-            const val = parseFloat(kMatch[1]) * 1000;
-            return isNaN(val) ? 0 : Math.round(val);
-        }
-        const m = text.match(r1) || text.match(r2) || text.match(r3);
-        if (m && m[1]) {
-            const val = parseInt(m[1].replace(/,/g, ''), 10);
-            return isNaN(val) ? 0 : val;
-        }
-        return 0;
-    }
-
-    function evaluateCandidateQuality(headline, fullCardText) {
-        const text = ((headline || '') + ' ' + (fullCardText || '')).toLowerCase();
-
-        // 1. High-Profile Tech Leaders & Tech Founders
-        const leaderRegex = /\b(vp of engineering|vice president of engineering|director of engineering|head of engineering|chief technology officer|cto|co-founder|founder|cofounder|chief architect|head of technology|vp of technology|director of technology|vp of product|head of product|founding engineer|founding partner|chief executive officer|ceo)\b/i;
-        const isLeader = leaderRegex.test(text);
-
-        // 2. Tech Insiders (Principal/Staff Engineers, Architects, Tech Leads)
-        const insiderRegex = /\b(principal software engineer|principal engineer|staff software engineer|staff engineer|distinguished engineer|senior staff engineer|principal architect|solutions architect|lead architect|tech lead|engineering lead|staff swe|principal swe)\b/i;
-        const isInsider = insiderRegex.test(text);
-
-        // 3. Tech Companies HRs (Technical Recruiters, Head of Talent, Talent Acquisition)
-        const hrRegex = /\b(technical recruiter|lead technical recruiter|senior technical recruiter|recruiting lead|recruiting manager|head of talent|talent acquisition|talent partner|head of people|people operations|people ops|tech recruiter|engineering recruiter|talent lead|staffing lead|talent advisor|hrbp|sourcer|technical sourcer)\b/i;
-        const isHR = hrRegex.test(text);
-
-        // 4. Software Engineers & Tech Specialists
-        const sweRegex = /\b(software engineer|software developer|swe|sde|sde[- ]?[123i]+|frontend|front-end|backend|back-end|full stack|fullstack|full-stack|devops|site reliability|sre|cloud engineer|platform engineer|systems engineer|data engineer|data scientist|ai engineer|machine learning|ml engineer|deep learning|security engineer|ios developer|android developer|mobile engineer)\b/i;
-        const isEngineer = sweRegex.test(text);
-
-        if (!isLeader && !isInsider && !isHR && !isEngineer) {
-            return null;
-        }
-
-        const bigTechRegex = /\b(google|microsoft|amazon|meta|facebook|apple|netflix|uber|stripe|airbnb|salesforce|nvidia|oracle|adobe|atlassian|linkedin|openai|anthropic|databricks|snowflake|palantir|bytedance|cisco|intel|amd|qualcomm|ibm|spotify|shopify|lyft|coinbase|robinhood|github|gitlab|cloudflare|datadog|mongodb|zoom|dropbox|snap|pinterest)\b/i;
-        const isBigTech = bigTechRegex.test(text);
-
-        const techContextRegex = /\b(tech|technology|technologies|software|labs|ai|startup|saas|cloud|fintech|robotics|ventures|capital|digital|systems|infra|platform|app|code|web)\b/i;
-        const hasTechContext = isBigTech || techContextRegex.test(text);
-
-        let category = "";
-        let roleLabel = "";
-        let baseScore = 0;
-
-        if (isLeader) {
-            category = "TECH_LEADER";
-            roleLabel = isBigTech ? "High-Profile Tech Leader (Big Tech)" : "High-Profile Tech Leader";
-            baseScore = 100;
-        } else if (isInsider) {
-            category = "TECH_INSIDER";
-            roleLabel = isBigTech ? "Tech Insider (Big Tech Staff/Principal)" : "Tech Insider (Staff/Principal)";
-            baseScore = 96;
-        } else if (isHR) {
-            category = "TECH_HR";
-            roleLabel = isBigTech ? "Tech Company HR (Big Tech)" : "Tech Company HR / Recruiter";
-            baseScore = 94;
-        } else if (isEngineer) {
-            category = "SOFTWARE_ENGINEER";
-            roleLabel = isBigTech ? "Software Engineer (Big Tech)" : (hasTechContext ? "Software Engineer (Tech)" : "Software Engineer");
-            baseScore = 85;
-        }
-
-        if (isBigTech) baseScore += 20;
-        if (hasTechContext) baseScore += 10;
-
-        return {
-            category: category,
-            roleLabel: roleLabel,
-            isBigTech: isBigTech,
-            hasTechContext: hasTechContext,
-            score: baseScore
-        };
-    }
-
-    function isConnectButton(b) {
-        if (!b) return false;
-        const txt = (b.innerText || b.textContent || '').trim().toLowerCase();
-        const aria = (b.getAttribute('aria-label') || '').toLowerCase();
-        
-        if (txt.includes('pending') || txt.includes('message') || txt.includes('following') || 
-            txt.includes('withdraw') || aria.includes('pending') || aria.includes('message') || 
-            aria.includes('following') || aria.includes('withdraw')) {
-            return false;
-        }
-        return txt === 'connect' || txt.startsWith('connect') || aria.includes('invite') || aria.includes('connect');
-    }
-
-    const candidateMap = new Map();
-    let tagIdx = Date.now();
-
-    const cardSelectors = [
-        'li.reusable-search__result-container',
-        'div.entity-result',
-        '[data-view-name*="search-entity-result"]',
-        '.entity-result__item',
-        'li.artdeco-card',
-        '.search-results-container li'
-    ];
-    const cards = document.querySelectorAll(cardSelectors.join(', '));
-
-    for (const card of cards) {
-        const link = card.querySelector('a.app-aware-link[href*="/in/"]') || card.querySelector('a[href*="/in/"]');
-        if (!link || !link.href || !link.href.includes('/in/')) continue;
-
-        let rawUrl = link.href;
-        if (rawUrl.startsWith('/')) rawUrl = 'https://www.linkedin.com' + rawUrl;
-        const cleanUrl = rawUrl.split('?')[0].split('#')[0].replace(/\/$/, '');
-        if (!cleanUrl || !cleanUrl.includes('/in/') || candidateMap.has(cleanUrl)) continue;
-
-        const cardText = (card.innerText || card.textContent || '').trim();
-        const lower = cardText.toLowerCase();
-        if (lower.includes('invitation sent') || lower.includes('pending') || lower.includes('withdraw') || lower.includes('• 1st') || lower.includes('1st degree')) {
-            continue;
-        }
-
-        const occEl = card.querySelector(
-            '.entity-result__primary-subtitle, .entity-result__summary, .artdeco-entity-lockup__subtitle, .base-search-card__subtitle'
-        );
-        let headline = occEl ? (occEl.innerText || occEl.textContent || '').trim() : '';
-        if (!headline) {
-            const lines = cardText.split('\n').map(l => l.trim()).filter(l => l.length > 3 && l.length < 150);
-            for (const l of lines) {
-                const low = l.toLowerCase();
-                if (low.includes('connect') || low.includes('connection') || low.includes('result') || low.includes('degree')) continue;
-                headline = l;
-                break;
-            }
-        }
-
-        const quality = evaluateCandidateQuality(headline, cardText);
-        if (!quality) continue;
-
-        const count = extractCount(cardText);
-
-        const nameEl = card.querySelector(
-            '.entity-result__title-text a, .entity-result__title-text, span[aria-hidden="true"], h3, a[href*="/in/"]'
-        );
-        let name = nameEl ? (nameEl.innerText || nameEl.textContent || '').trim().split('\n')[0] : 'Tech Professional';
-        if (!name || name.length > 50) name = 'Tech Professional';
-
-        let connectBtn = null;
-        const buttons = card.querySelectorAll('button, [role="button"], a.artdeco-button');
-        for (const b of buttons) {
-            if (isConnectButton(b)) {
-                connectBtn = b;
-                break;
-            }
-        }
-
-        tagIdx++;
-        const cardTag = 'ac-srch-card-' + tagIdx;
-        let btnTag = null;
-        card.setAttribute('data-ac-card', cardTag);
-        if (connectBtn) {
-            btnTag = 'ac-srch-btn-' + tagIdx;
-            connectBtn.setAttribute('data-ac-btn', btnTag);
-        }
-
-        let finalScore = quality.score + (count >= 50 ? 15 : 0) + (connectBtn ? 10 : 0);
-
-        candidateMap.set(cleanUrl, {
-            cardTag: cardTag,
-            btnTag: btnTag,
-            url: cleanUrl,
-            name: name,
-            headline: headline,
-            role_category: quality.category,
-            role_label: quality.roleLabel,
-            is_big_tech: quality.isBigTech,
-            quality_score: finalScore,
-            mutual_count: count
-        });
-    }
-
-    const candidates = Array.from(candidateMap.values());
-    candidates.sort((a, b) => b.quality_score - a.quality_score);
-    return candidates;
-})()
-"""
-
-# Client-side script scanning LinkedIn Sent Invitations page (/mynetwork/invitation-manager/sent/)
-# Filters for invitations that were sent > 1 week ago (e.g. "1 week ago", "2 weeks ago", "1 month ago", "7+ days ago")
-SCRIPT_SCAN_SENT_INVITATIONS = r"""
-(() => {
-    function isOlderThanOneWeek(text) {
-        if (!text) return false;
-        const lower = text.toLowerCase();
-        // Check for weeks, months, years ago
-        if (/\b\d+\s*(?:week|month|year)s?\s*ago\b/i.test(lower)) return true;
-        if (/\b(?:a|one)\s*(?:week|month|year)\s*ago\b/i.test(lower)) return true;
-        // Check for 7+ days ago
-        const daysMatch = lower.match(/\b(\d+)\s*days?\s*ago\b/i);
-        if (daysMatch && parseInt(daysMatch[1], 10) >= 7) return true;
-        return false;
-    }
-
-    const items = [];
-    const seen = new Set();
-    let tagIdx = Date.now();
-
-    // Find all leaf elements representing a Withdraw action
-    const withdrawTriggers = Array.from(document.querySelectorAll('button, a, span')).filter(el => {
-        const txt = (el.innerText || el.textContent || '').trim().toLowerCase();
-        const aria = (el.getAttribute('aria-label') || '').toLowerCase();
-        const isWithdraw = txt === 'withdraw' || aria.includes('withdraw') || txt.includes('withdraw');
-        return isWithdraw && el.children.length === 0;
-    });
-
-    for (const trigger of withdrawTriggers) {
-        const withdrawBtn = trigger.tagName === 'BUTTON' || trigger.tagName === 'A' ? trigger : (trigger.closest('button, a') || trigger);
-
-        // Climb up to find card container holding a LinkedIn profile URL
-        let card = null;
-        let parent = withdrawBtn.parentElement;
-        while (parent && parent !== document.body) {
-            if (parent.querySelector('a[href*="/in/"]')) {
-                card = parent;
-                break;
-            }
-            parent = parent.parentElement;
-        }
-
-        if (!card) continue;
-
-        // Extract profile link
-        const link = card.querySelector('a.invitation-card__link[href*="/in/"]') || 
-                     card.querySelector('a[href*="/in/"]');
-        if (!link || !link.href || !link.href.includes('/in/')) continue;
-
-        let rawUrl = link.href;
-        if (rawUrl.startsWith('/')) rawUrl = 'https://www.linkedin.com' + rawUrl;
-        const cleanUrl = rawUrl.split('?')[0].split('#')[0].replace(/\/$/, '');
-        if (!cleanUrl || !cleanUrl.includes('/in/') || seen.has(cleanUrl)) continue;
-
-        // Extract full card text
-        const cardText = (card.innerText || card.textContent || '').trim();
-        const timeMatch = cardText.match(/\b(?:Sent\s+)?(\d+\s*(?:minute|hour|day|week|month|year)s?\s*ago|\b(?:yesterday|just now))\b/i);
-        const timeText = timeMatch ? timeMatch[0] : '';
-
-        if (!isOlderThanOneWeek(cardText)) {
-            continue; // Skip if less than 1 week old
-        }
-
-        // Extract candidate name
-        const nameEl = card.querySelector(
-            '.invitation-card__title, span[aria-hidden="true"], h3, a[href*="/in/"]'
-        );
-        let name = nameEl ? (nameEl.innerText || nameEl.textContent || '').trim().split('\n')[0] : 'Member';
-        if (!name || name.length > 50 || name.toLowerCase().includes('withdraw')) {
-            name = (cardText.split('|')[0] || 'Member').trim();
-        }
-
-        seen.add(cleanUrl);
-        tagIdx++;
-        const cardTag = 'ac-wd-card-' + tagIdx;
-        const btnTag = 'ac-wd-btn-' + tagIdx;
-        card.setAttribute('data-ac-wd-card', cardTag);
-        withdrawBtn.setAttribute('data-ac-wd-btn', btnTag);
-
-        items.push({
-            cardTag: cardTag,
-            btnTag: btnTag,
-            url: cleanUrl,
-            profile_url: cleanUrl,
-            name: name,
-            timeText: timeText || '1+ week ago'
-        });
-    }
-
-    return items;
-})()
-"""
-
-
 async def send_candidate_invitation(page: Page, cand: Dict[str, Any]) -> str:
     """
     Rapidly clicks the Connect button for a candidate and confirms modal.
@@ -981,177 +680,33 @@ async def send_candidate_invitation(page: Page, cand: Dict[str, Any]) -> str:
     return "SUCCESS"
 
 
-async def auto_send_search_invitations(
-    page: Page,
-    profile_id: str,
-    max_search_invitations: int = 15
-) -> int:
-    """
-    Automates sending connection invitations directly from LinkedIn Search targeting:
-    1. High-Profile Tech Leaders (VP of Engineering, Director of Engineering, CTO, Tech Founder)
-    2. Tech Insiders (Principal/Staff Software Engineers, Distinguished Engineers, Tech Leads)
-    3. Tech Companies HRs (Technical Recruiters, Head of Talent, Talent Acquisition)
-    Up to max_search_invitations (typically 50% of the profile's daily cap limit).
-    """
-    profile = await db.get_profile(profile_id)
-    daily_cap = profile.get("daily_limit", 30) if profile else 30
-    today_str = datetime.now().strftime("%Y-%m-%d")
-
-    counts = await db.get_today_method_counts(profile_id, today_str)
-    total_sent_today = counts["total"]
-    search_sent_today = counts["search"]
-
-    if total_sent_today >= daily_cap:
-        logger.info(f"🎯 Full daily cap limit ({total_sent_today}/{daily_cap}) has already been sent today for profile '{profile_id}'. Stopping search.")
-        return 0
-
-    if search_sent_today >= max_search_invitations:
-        logger.info(f"🎯 Search method quota ({search_sent_today}/{max_search_invitations}) has already been reached today for profile '{profile_id}'. Stopping search.")
-        return 0
-
-    needed_search = min(max_search_invitations - search_sent_today, daily_cap - total_sent_today)
-    logger.info(
-        f"⚡ Starting LinkedIn Direct Search auto-send for '{profile_id}': "
-        f"Already sent via Search today: {search_sent_today}/{max_search_invitations}. "
-        f"Target: Send {needed_search} invitations to High-Profile Tech Leaders, Tech Insiders & Tech HRs..."
-    )
-
-    sent_this_session = 0
-    already_sent = await db.get_sent_urls_for_profile(profile_id)
-    attempted_urls = set(u.rstrip("/") for u in already_sent)
-
-    # Shuffle query pools to obtain a rich, balanced mix across Leaders, Insiders, and HRs
-    shuffled_queries = list(SEARCH_QUERY_POOLS)
-    random.shuffle(shuffled_queries)
-
-    for query in shuffled_queries:
-        if total_sent_today >= daily_cap or search_sent_today >= max_search_invitations:
-            break
-
-        # Search across pages 1 to 3
-        for page_num in range(1, 4):
-            if total_sent_today >= daily_cap or search_sent_today >= max_search_invitations:
-                break
-
-            encoded_query = quote(query)
-            search_url = f"https://www.linkedin.com/search/results/people/?keywords={encoded_query}&origin=GLOBAL_SEARCH_HEADER&page={page_num}"
-            logger.info(f"⚡ [LinkedIn Search] Searching: {query} (Page {page_num})")
-
-            try:
-                await page.goto(search_url, wait_until="domcontentloaded", timeout=45000)
-                await asyncio.sleep(2.0)
-
-                # Scroll down smoothly to ensure dynamic result cards render
-                await page.mouse.wheel(0, 800)
-                await asyncio.sleep(1.0)
-                await page.mouse.wheel(0, 800)
-                await asyncio.sleep(0.8)
-
-                candidates = await page.evaluate(SCRIPT_SCAN_SEARCH_CANDIDATES)
-                new_cands = [c for c in candidates if c.get("url", "").rstrip("/") not in attempted_urls]
-
-                if not new_cands:
-                    logger.info(f"No new candidates on search page {page_num} for query: {query}")
-                    continue
-
-                leaders_count = sum(1 for c in new_cands if c.get("role_category") == "TECH_LEADER")
-                insiders_count = sum(1 for c in new_cands if c.get("role_category") == "TECH_INSIDER")
-                hrs_count = sum(1 for c in new_cands if c.get("role_category") == "TECH_HR")
-                swe_count = sum(1 for c in new_cands if c.get("role_category") == "SOFTWARE_ENGINEER")
-
-                logger.info(
-                    f"Found {len(new_cands)} verified quality candidates on Search page {page_num} "
-                    f"({leaders_count} Tech Leaders, {insiders_count} Tech Insiders, {hrs_count} Tech HRs, {swe_count} SWEs)"
-                )
-
-                for cand in new_cands:
-                    if total_sent_today >= daily_cap or search_sent_today >= max_search_invitations:
-                        break
-
-                    cand_url = cand.get("url", "").rstrip("/")
-                    if cand_url in attempted_urls:
-                        continue
-                    attempted_urls.add(cand_url)
-
-                    status = "FAILED"
-                    # If candidate has direct Connect button on the search card, click it directly
-                    if cand.get("btnTag"):
-                        status = await send_candidate_invitation(page, cand)
-
-                    # If direct click on search card wasn't available or failed, navigate to profile
-                    if status not in ("SUCCESS", "WEEKLY_LIMIT"):
-                        logger.info(f"Direct card click unavailable. Navigating to profile: {cand['name']} ({cand_url})...")
-                        try:
-                            step_res = await execute_interaction_step(page, cand_url)
-                            if step_res.get("success"):
-                                status = "SUCCESS"
-                        except Exception as step_err:
-                            logger.debug(f"Profile interaction error: {step_err}")
-
-                    if status == "WEEKLY_LIMIT":
-                        logger.warning(f"Stopping search auto-send: LinkedIn weekly invitation limit reached. Total today: {total_sent_today}/{daily_cap}")
-                        return sent_this_session
-
-                    if status == "SUCCESS":
-                        await db.record_sent_connection(
-                            profile_id=profile_id,
-                            target_url=cand_url,
-                            mutual_count=cand.get("mutual_count", 0),
-                            name=cand.get("name"),
-                            role_label=cand.get("role_label"),
-                            method="search"
-                        )
-                        total_sent_today += 1
-                        search_sent_today += 1
-                        sent_this_session += 1
-                        role_tag = f" [{cand.get('role_label', 'Tech Leader / HR')}]"
-                        logger.info(f"✓ [{search_sent_today}/{max_search_invitations} Search today | {total_sent_today}/{daily_cap} Total] Sent invitation to {cand['name']}{role_tag}")
-
-                        if total_sent_today >= daily_cap or search_sent_today >= max_search_invitations:
-                            break
-
-                        cooldown = random.uniform(1.2, 2.2)
-                        await asyncio.sleep(cooldown)
-
-            except Exception as e:
-                logger.error(f"Error during search for '{query}' on page {page_num}: {e}", exc_info=True)
-
-    logger.info(f"⚡ Search method run completed for '{profile_id}': Sent {sent_this_session} invitations (Search total today: {search_sent_today}/{max_search_invitations}).")
-    return sent_this_session
-
-
 async def auto_send_network_invitations(
     page: Page, 
     profile_id: str, 
     min_mutual: int = 50, 
-    max_invitations: int = 15
+    max_invitations: int = 30
 ) -> int:
     """
-    Automates sending connection requests on My Network rapidly to profiles having
+    Automates sending connection requests directly through My Network section to profiles having
     >= 100 mutual connections (prioritizing Recent Activity). Targets high-quality profiles:
     Tech Founders, HR/Recruiters, Software Engineers.
-    Up to max_invitations (typically 50% of the profile's daily cap limit).
+    Fulfills the profile's full daily cap limit directly through My Network.
     """
     profile = await db.get_profile(profile_id)
     daily_cap = profile.get("daily_limit", 30) if profile else 30
+    target_cap = min(max_invitations, daily_cap)
     today_str = datetime.now().strftime("%Y-%m-%d")
 
-    counts = await db.get_today_method_counts(profile_id, today_str)
-    total_sent_today = counts["total"]
-    network_sent_today = counts["network"]
+    total_sent_today = await db.get_today_sent_count(profile_id, today_str)
 
-    if total_sent_today >= daily_cap:
-        logger.info(f"🎯 Full daily cap limit ({total_sent_today}/{daily_cap}) has already been sent today for profile '{profile_id}'. Stopping network run.")
+    if total_sent_today >= target_cap:
+        logger.info(f"🎯 Full daily cap limit ({total_sent_today}/{target_cap}) has already been sent today for profile '{profile_id}'. Stopping network run.")
         return 0
 
-    if network_sent_today >= max_invitations:
-        logger.info(f"🎯 Network quota ({network_sent_today}/{max_invitations}) has already been reached today for profile '{profile_id}'. Stopping network run.")
-        return 0
-
-    remaining_needed = min(max_invitations - network_sent_today, daily_cap - total_sent_today)
+    remaining_needed = max(0, target_cap - total_sent_today)
     logger.info(
-        f"⚡ Starting rapid quality auto-send for '{profile_id}' on My Network: "
-        f"Already sent via Network today: {network_sent_today}/{max_invitations}. "
+        f"⚡ Starting rapid quality auto-send for '{profile_id}' directly on My Network: "
+        f"Already sent today: {total_sent_today}/{target_cap}. "
         f"Goal: Send remaining {remaining_needed} invitations (Targeting: >100 mutual connections, Tech Founders, HR/Recruiters, SWEs)..."
     )
 
@@ -1166,7 +721,7 @@ async def auto_send_network_invitations(
     if pending_in_db:
         logger.info(f"Processing {len(pending_in_db)} already queued pending targets...")
         for item in pending_in_db:
-            if total_sent_today >= daily_cap or network_sent_today >= max_invitations:
+            if total_sent_today >= target_cap:
                 break
             item_id = item["id"]
             target_url = item["target_url"]
@@ -1178,16 +733,15 @@ async def auto_send_network_invitations(
                 if res.get("success"):
                     await db.update_queue_item_status(item_id, "completed", error_message="Invitation sent automatically")
                     total_sent_today += 1
-                    network_sent_today += 1
                     sent_this_session += 1
-                    logger.info(f"✓ [{network_sent_today}/{max_invitations} Network today | {total_sent_today}/{daily_cap} Total] Sent invitation to {target_url}")
+                    logger.info(f"✓ [{total_sent_today}/{target_cap} sent today] Sent invitation to {target_url}")
                 else:
                     await db.update_queue_item_status(item_id, "failed", error_message=res.get("message"))
             except Exception as e:
                 logger.error(f"Failed sending to {target_url}: {e}")
                 await db.update_queue_item_status(item_id, "failed", error_message=str(e)[:200])
 
-            if total_sent_today < daily_cap and network_sent_today < max_invitations:
+            if total_sent_today < target_cap:
                 await asyncio.sleep(random.uniform(1.0, 1.8))
 
     # Step 2: Recommendations on My Network (/mynetwork/grow/ & /mynetwork/)
@@ -1197,7 +751,7 @@ async def auto_send_network_invitations(
     ]
 
     for net_url in network_urls:
-        if total_sent_today >= daily_cap or network_sent_today >= max_invitations:
+        if total_sent_today >= target_cap:
             break
         try:
             curr_url = page.url.lower().rstrip("/")
@@ -1243,8 +797,8 @@ async def auto_send_network_invitations(
             # Loop up to 60 scroll/pagination passes on the Network page
             consecutive_empty_scrolls = 0
             for scroll_idx in range(60):
-                if total_sent_today >= daily_cap or network_sent_today >= max_invitations:
-                    logger.info(f"🎯 Network target reached ({network_sent_today}/{max_invitations} Network | {total_sent_today}/{daily_cap} Total).")
+                if total_sent_today >= target_cap:
+                    logger.info(f"🎯 Network target reached ({total_sent_today}/{target_cap} sent today).")
                     break
 
                 candidates = await page.evaluate(SCRIPT_SCAN_CANDIDATES)
@@ -1262,7 +816,7 @@ async def auto_send_network_invitations(
                     )
 
                     for cand in new_cands:
-                        if total_sent_today >= daily_cap or network_sent_today >= max_invitations:
+                        if total_sent_today >= target_cap:
                             break
                         cand_url = cand.get("url", "").rstrip("/")
                         if cand_url in attempted_urls:
@@ -1271,7 +825,7 @@ async def auto_send_network_invitations(
 
                         status = await send_candidate_invitation(page, cand)
                         if status == "WEEKLY_LIMIT":
-                            logger.warning(f"Stopping network auto-send: LinkedIn weekly invitation limit reached. Total sent today: {total_sent_today}/{daily_cap}")
+                            logger.warning(f"Stopping network auto-send: LinkedIn weekly invitation limit reached. Total sent today: {total_sent_today}/{target_cap}")
                             return sent_this_session
                         if status == "SUCCESS":
                             await db.record_sent_connection(
@@ -1283,12 +837,11 @@ async def auto_send_network_invitations(
                                 method="network"
                             )
                             total_sent_today += 1
-                            network_sent_today += 1
                             sent_this_session += 1
                             sec_tag = " [Recent Activity]" if cand.get("is_recent_activity") else ""
                             role_tag = f" [{cand.get('role_label', 'Quality Target')}]"
-                            logger.info(f"✓ [{network_sent_today}/{max_invitations} Network today | {total_sent_today}/{daily_cap} Total] Sent invitation to {cand['name']} ({cand['mutual_count']} connections){role_tag}{sec_tag}")
-                            if total_sent_today >= daily_cap or network_sent_today >= max_invitations:
+                            logger.info(f"✓ [{total_sent_today}/{target_cap} sent today] Sent invitation to {cand['name']} ({cand['mutual_count']} connections){role_tag}{sec_tag}")
+                            if total_sent_today >= target_cap:
                                 break
                             cooldown = random.uniform(1.0, 1.8)
                             await asyncio.sleep(cooldown)
@@ -1347,7 +900,11 @@ async def auto_send_network_invitations(
         except Exception as e:
             logger.error(f"Error on {net_url}: {e}", exc_info=True)
 
-    logger.info(f"⚡ Rapid My Network auto-send completed for '{profile_id}': Sent {sent_this_session} in this run (Network today: {network_sent_today}/{max_invitations} | Total today: {total_sent_today}/{daily_cap}).")
+    if total_sent_today >= target_cap:
+        await db.record_daily_auto_run_completed(profile_id, today_str)
+        logger.info(f"🎉 Fully completed all daily cap invitations ({total_sent_today}/{target_cap}) for '{profile_id}' directly via My Network! Marked as completed for today.")
+
+    logger.info(f"⚡ Rapid My Network auto-send completed for '{profile_id}': Sent {sent_this_session} in this run (Total today: {total_sent_today}/{target_cap}).")
     return sent_this_session
 
 
@@ -1357,321 +914,15 @@ async def auto_send_dual_strategy_invitations(
     daily_cap: int = 30
 ) -> int:
     """
-    Orchestrates the 50/50 dual connection dispatch strategy:
-    - 50% via Direct LinkedIn Search (High-Profile Tech Leaders, Tech Insiders, Tech HRs)
-    - 50% via My Network (100+ Mutual Connections)
-    Ensures the profile fulfills its exact daily cap limit (default 30/day).
+    Sends all connection requests directly through My Network section (100+ mutual connections).
+    Fulfills the profile's full daily cap limit.
     """
-    profile = await db.get_profile(profile_id)
-    daily_limit = profile.get("daily_limit", daily_cap) if profile else daily_cap
-    today_str = datetime.now().strftime("%Y-%m-%d")
-
-    counts = await db.get_today_method_counts(profile_id, today_str)
-    already_sent_today = counts["total"]
-    search_sent_today = counts["search"]
-    network_sent_today = counts["network"]
-
-    if already_sent_today >= daily_limit:
-        logger.info(
-            f"🎯 Full daily cap limit ({already_sent_today}/{daily_limit}) has already been sent today for profile '{profile_id}' "
-            f"(Search: {search_sent_today}, Network: {network_sent_today}). Stopping."
-        )
-        return 0
-
-    target_search_quota = daily_limit // 2
-    target_network_quota = daily_limit - target_search_quota
-
-    logger.info(
-        f"⚡ Starting 50/50 Dual-Strategy Dispatch for '{profile_id}':\n"
-        f"   - Daily Cap: {daily_limit} invitations\n"
-        f"   - 50% Search Quota: {target_search_quota} (Sent today: {search_sent_today})\n"
-        f"   - 50% Network Quota: {target_network_quota} (Sent today: {network_sent_today})\n"
-        f"   - Total Sent Today: {already_sent_today}/{daily_limit}"
+    return await auto_send_network_invitations(
+        page=page,
+        profile_id=profile_id,
+        min_mutual=50,
+        max_invitations=daily_cap
     )
-
-    total_sent_this_session = 0
-
-    # Phase 1: Search Method (50% quota: High-Profile Tech Leaders, Tech Insiders, Tech HRs)
-    if search_sent_today < target_search_quota and already_sent_today < daily_limit:
-        search_needed = target_search_quota - search_sent_today
-        logger.info(f"🚀 [Phase 1: Search Method] Dispatching up to {search_needed} invitations to Tech Leaders, Insiders & HRs via LinkedIn Search...")
-        sent_search = await auto_send_search_invitations(
-            page=page,
-            profile_id=profile_id,
-            max_search_invitations=target_search_quota
-        )
-        total_sent_this_session += sent_search
-
-    # Refresh counts
-    counts = await db.get_today_method_counts(profile_id, today_str)
-    already_sent_today = counts["total"]
-    network_sent_today = counts["network"]
-
-    # Phase 2: Network Method (50% quota: >100 Mutual Connections)
-    if network_sent_today < target_network_quota and already_sent_today < daily_limit:
-        net_needed = target_network_quota - network_sent_today
-        logger.info(f"🚀 [Phase 2: Network Method] Dispatching up to {net_needed} invitations to profiles with >100 mutual connections on My Network...")
-        sent_net = await auto_send_network_invitations(
-            page=page,
-            profile_id=profile_id,
-            min_mutual=50,
-            max_invitations=target_network_quota
-        )
-        total_sent_this_session += sent_net
-
-    # Refresh counts
-    counts = await db.get_today_method_counts(profile_id, today_str)
-    already_sent_today = counts["total"]
-
-    # Phase 3: Remainder fulfillment if either method had a shortage of candidates
-    if already_sent_today < daily_limit:
-        remainder_needed = daily_limit - already_sent_today
-        logger.info(f"🔄 [Phase 3: Remainder Fulfillment] Still need {remainder_needed} invitations to reach full daily cap of {daily_limit}. Running supplemental dispatch...")
-        sent_supp = await auto_send_search_invitations(
-            page=page,
-            profile_id=profile_id,
-            max_search_invitations=daily_limit
-        )
-        total_sent_this_session += sent_supp
-
-        counts = await db.get_today_method_counts(profile_id, today_str)
-        already_sent_today = counts["total"]
-        if already_sent_today < daily_limit:
-            sent_supp_net = await auto_send_network_invitations(
-                page=page,
-                profile_id=profile_id,
-                min_mutual=50,
-                max_invitations=daily_limit
-            )
-            total_sent_this_session += sent_supp_net
-
-    counts = await db.get_today_method_counts(profile_id, today_str)
-    already_sent_today = counts["total"]
-    search_sent_today = counts["search"]
-    network_sent_today = counts["network"]
-
-    if already_sent_today >= daily_limit:
-        await db.record_daily_auto_run_completed(profile_id, today_str)
-        logger.info(f"🎉 Fully completed all daily cap invitations ({already_sent_today}/{daily_limit}) for '{profile_id}'! (Search: {search_sent_today}, Network: {network_sent_today}). Marked as completed for today.")
-    else:
-        logger.warning(f"⚠️ Dispatch finished with {already_sent_today}/{daily_limit} invitations sent today for '{profile_id}' (Search: {search_sent_today}, Network: {network_sent_today}).")
-
-    # Phase 4: Stale Invitations Recycling (>1 week old) - Outside of the 30 daily cap!
-    try:
-        recycled = await withdraw_and_resend_stale_invitations(page=page, profile_id=profile_id, max_recycle=20)
-        if recycled > 0:
-            logger.info(f"♻️ Recycled and resent {recycled} stale invitation(s) (>1 week old) for '{profile_id}' (outside of daily cap).")
-    except Exception as rec_err:
-        logger.warning(f"Error during stale invitations recycling: {rec_err}")
-
-    return total_sent_this_session
-
-
-async def withdraw_and_resend_stale_invitations(
-    page: Page,
-    profile_id: str,
-    max_recycle: int = 20
-) -> int:
-    """
-    Navigates to the 'Sent Invitations' section (/mynetwork/invitation-manager/sent/),
-    locates pending invitations sent more than 1 week ago, withdraws them, and
-    attempts to resend the connection invitation.
-    IMPORTANT: This is independent from and outside of the 30 daily new connections cap!
-    """
-    sent_url = "https://www.linkedin.com/mynetwork/invitation-manager/sent/"
-    logger.info(f"♻️ [Recycle Engine] Navigating to sent invitations section for '{profile_id}' to inspect invitations sent > 1 week ago...")
-
-    try:
-        await page.goto(sent_url, wait_until="domcontentloaded", timeout=45000)
-        await asyncio.sleep(2.5)
-        # Wait up to 5s for cards or empty state container to hydrate
-        try:
-            await page.wait_for_selector(
-                "li.invitation-card, div.invitation-card, [data-view-name*='invitation'], .mn-invitation-list, div:has-text('No sent invitations'), p:has-text('No sent invitations')",
-                timeout=5000
-            )
-        except Exception:
-            pass
-    except Exception as e:
-        logger.error(f"Failed navigating to sent invitations manager: {e}")
-        return 0
-
-    recycled_count = 0
-    attempted_urls = set()
-
-    for pass_idx in range(5):
-        if recycled_count >= max_recycle:
-            break
-
-        # Gentle scroll down to trigger cards hydration
-        try:
-            await page.mouse.wheel(0, 1000)
-            await asyncio.sleep(1.0)
-        except Exception:
-            pass
-
-        stale_items = await page.evaluate(SCRIPT_SCAN_SENT_INVITATIONS)
-        unprocessed = [it for it in stale_items if it.get("url") not in attempted_urls]
-
-        if not unprocessed:
-            try:
-                diag = await page.evaluate("""() => {
-                    const triggers = Array.from(document.querySelectorAll('button, a, span')).filter(el => {
-                        const txt = (el.innerText || el.textContent || '').trim().toLowerCase();
-                        const aria = (el.getAttribute('aria-label') || '').toLowerCase();
-                        return (txt === 'withdraw' || aria.includes('withdraw') || txt.includes('withdraw')) && el.children.length === 0;
-                    });
-                    const samples = triggers.slice(0, 4).map(tr => {
-                        let btn = tr.tagName === 'BUTTON' || tr.tagName === 'A' ? tr : (tr.closest('button, a') || tr);
-                        let p = btn.parentElement;
-                        let card = null;
-                        while (p && p !== document.body) {
-                            if (p.querySelector('a[href*="/in/"]')) { card = p; break; }
-                            p = p.parentElement;
-                        }
-                        return card ? (card.innerText || '').replace(/\\n+/g, ' | ').slice(0, 100) : 'Card';
-                    });
-                    return {
-                        totalCards: triggers.length,
-                        samples: samples
-                    };
-                }""")
-                logger.info(f"Sent Manager pass {pass_idx + 1}: Found {diag.get('totalCards')} sent invitation(s) on page, but 0 are > 1 week old. Samples: {diag.get('samples')}")
-            except Exception as diag_err:
-                logger.debug(f"Diagnostic error: {diag_err}")
-            logger.info(f"No stale invitations (>1 week old) detected on pass {pass_idx + 1}.")
-            # Check if there is a next page button
-            try:
-                next_btn = page.locator("button[aria-label='Next'], a.artdeco-pagination__button--next").first
-                if await next_btn.count() > 0 and await next_btn.is_visible() and not await next_btn.is_disabled():
-                    logger.info("Clicking next page on sent invitations manager...")
-                    await next_btn.click()
-                    await asyncio.sleep(2.5)
-                    continue
-            except Exception:
-                pass
-            break
-
-        logger.info(f"Found {len(unprocessed)} stale invitation(s) sent > 1 week ago on pass {pass_idx + 1}.")
-
-        for item in unprocessed:
-            if recycled_count >= max_recycle:
-                break
-
-            cand_url = item.get("url")
-            name = item.get("name", "Member")
-            btn_tag = item.get("btnTag")
-            time_text = item.get("timeText", "1+ week ago")
-
-            if cand_url in attempted_urls:
-                continue
-            attempted_urls.add(cand_url)
-
-            logger.info(f"♻️ Withdrawing invitation for {name} sent {time_text} ({cand_url})...")
-
-            # 1. Scroll button into view
-            try:
-                await page.evaluate(f"""() => {{
-                    const b = document.querySelector("[data-ac-wd-btn='{btn_tag}']");
-                    if (b) b.scrollIntoView({{ behavior: 'instant', block: 'center' }});
-                }}""")
-                await asyncio.sleep(0.3)
-            except Exception:
-                pass
-
-            # 2. Click Withdraw button on the card
-            clicked = False
-            btn_loc = page.locator(f"[data-ac-wd-btn='{btn_tag}']").first
-            if await btn_loc.count() > 0:
-                try:
-                    await btn_loc.click(timeout=1500)
-                    clicked = True
-                except Exception:
-                    pass
-
-            if not clicked:
-                clicked = await page.evaluate(f"""() => {{
-                    const b = document.querySelector("[data-ac-wd-btn='{btn_tag}']");
-                    if (b) {{ b.click(); return true; }}
-                    return false;
-                }}""")
-
-            if not clicked:
-                logger.warning(f"Could not click Withdraw for {name}")
-                continue
-
-            await asyncio.sleep(random.uniform(0.7, 1.2))
-
-            # 3. Confirm withdrawal in confirmation dialog
-            confirmed = False
-            try:
-                confirm_btn = page.locator(
-                    "div[role='dialog'] button:has-text('Withdraw'), div[role='dialog'] button.artdeco-button--primary"
-                ).first
-                if await confirm_btn.count() > 0 and await confirm_btn.is_visible():
-                    await confirm_btn.click()
-                    confirmed = True
-                    logger.info(f"Confirmed withdrawal for {name}")
-            except Exception as e:
-                logger.debug(f"Modal button click error: {e}")
-
-            if not confirmed:
-                confirmed = await page.evaluate("""() => {
-                    const dialog = document.querySelector('div[role="dialog"]');
-                    if (!dialog) return false;
-                    const btns = Array.from(dialog.querySelectorAll('button'));
-                    for (const b of btns) {
-                        const txt = (b.innerText || b.textContent || '').trim().toLowerCase();
-                        if (txt === 'withdraw' || txt.includes('withdraw')) {
-                            b.click();
-                            return true;
-                        }
-                    }
-                    return false;
-                }""")
-
-            if not confirmed:
-                logger.warning(f"Could not confirm withdrawal modal for {name}")
-                continue
-
-            await asyncio.sleep(random.uniform(1.2, 2.0))
-
-            # 4. Attempt to resend connection request
-            resent = False
-            if cand_url:
-                logger.info(f"Attempting to resend invitation to {name} ({cand_url})...")
-                try:
-                    res = await execute_interaction_step(page, cand_url)
-                    if res.get("success"):
-                        resent = True
-                        logger.info(f"✓ Successfully resent invitation to {name}!")
-                    else:
-                        logger.info(f"Resend notice for {name}: {res.get('message')}")
-                except Exception as resend_err:
-                    logger.warning(f"Resend interaction failed for {name}: {resend_err}")
-
-                # Return back to sent invitations page
-                try:
-                    await page.goto(sent_url, wait_until="domcontentloaded", timeout=45000)
-                    await asyncio.sleep(2.0)
-                except Exception:
-                    pass
-
-            # 5. Record recycled invitation in database (does NOT count towards daily cap!)
-            await db.record_recycled_invitation(
-                profile_id=profile_id,
-                target_url=cand_url,
-                name=name,
-                resent_success=resent
-            )
-            recycled_count += 1
-            logger.info(f"✓ [Recycle Engine] Processed #{recycled_count}: {name} (Withdrawn & Resent: {resent})")
-            await asyncio.sleep(random.uniform(1.5, 2.5))
-
-    logger.info(f"♻️ [Recycle Engine] Finished: Withdrew and processed {recycled_count} stale invitations for '{profile_id}'.")
-    return recycled_count
-
-
 
 
 async def open_interactive_session(
@@ -1779,20 +1030,21 @@ async def open_interactive_session(
             else:
                 remaining_needed = daily_limit - already_sent_today
                 logger.info(
-                    f"Logged in! Starting FAST automatic 50/50 quality connection invitations for '{profile_id}' "
+                    f"Logged in! Starting FAST automatic My Network connection invitations for '{profile_id}' "
                     f"(Already sent today: {already_sent_today}/{daily_limit}, Remaining: {remaining_needed}, "
-                    f"Target: 50% Search [Tech Leaders, Insiders, HRs] + 50% Network [>100 Mutual Connections])..."
+                    f"Target: My Network [>100 Mutual Connections, Tech Founders, HRs, SWEs])..."
                 )
                 await db.update_profile_status(profile_id, "running")
                 worker_page = page if (page and not page.is_closed()) else await context.new_page()
                 await worker_page.bring_to_front()
 
-                sent = await auto_send_dual_strategy_invitations(
+                sent = await auto_send_network_invitations(
                     page=worker_page,
                     profile_id=profile_id,
-                    daily_cap=daily_limit
+                    min_mutual=50,
+                    max_invitations=daily_limit
                 )
-                logger.info(f"⚡ Completed sending {sent} connection invitations for '{profile_id}' in this run.")
+                logger.info(f"⚡ Completed sending {sent} connection invitations for '{profile_id}' directly via My Network in this run.")
                 await asyncio.sleep(2)
 
         logger.info(f"Interactive session finished for profile '{profile_id}'")

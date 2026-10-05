@@ -6,6 +6,7 @@ and FastAPI endpoint responses.
 
 import os
 import sys
+import shutil
 import asyncio
 import unittest
 from fastapi.testclient import TestClient
@@ -123,32 +124,30 @@ class TestDatabaseLayer(unittest.IsolatedAsyncioTestCase):
         due_off = await db.get_auto_pilot_due_profiles(current_hour=10, today_str="2026-10-03")
         self.assertFalse(any(p["id"] == ap_test_id for p in due_off))
 
-        # Test 50/50 Dual Strategy method tracking
-        dual_test_id = "test_dual_profile"
-        await db.delete_profile(dual_test_id)
-        await db.create_profile(dual_test_id, label="Dual Test Profile", daily_limit=30)
+        # Test My Network connection method tracking
+        net_test_id = "test_net_profile"
+        await db.delete_profile(net_test_id)
+        await db.create_profile(net_test_id, label="Network Test Profile", daily_limit=30)
 
-        # Record 2 via Search
+        # Record 4 via Network
         await db.record_sent_connection(
-            dual_test_id, 
+            net_test_id, 
             "https://www.linkedin.com/in/vp-eng-stripe", 
-            mutual_count=0, 
+            mutual_count=140, 
             name="VP Eng Stripe", 
-            role_label="High-Profile Tech Leader", 
-            method="search"
+            role_label="Tech Founder", 
+            method="network"
         )
         await db.record_sent_connection(
-            dual_test_id, 
+            net_test_id, 
             "https://www.linkedin.com/in/tech-recruiter-meta", 
-            mutual_count=0, 
+            mutual_count=110, 
             name="Recruiter Meta", 
-            role_label="Tech Company HR", 
-            method="search"
+            role_label="HR / Recruiter", 
+            method="network"
         )
-
-        # Record 2 via Network
         await db.record_sent_connection(
-            dual_test_id, 
+            net_test_id, 
             "https://www.linkedin.com/in/founder-ai", 
             mutual_count=130, 
             name="Founder AI", 
@@ -156,7 +155,7 @@ class TestDatabaseLayer(unittest.IsolatedAsyncioTestCase):
             method="network"
         )
         await db.record_sent_connection(
-            dual_test_id, 
+            net_test_id, 
             "https://www.linkedin.com/in/staff-swe-google", 
             mutual_count=115, 
             name="Staff SWE Google", 
@@ -164,55 +163,18 @@ class TestDatabaseLayer(unittest.IsolatedAsyncioTestCase):
             method="network"
         )
 
-        counts = await db.get_today_method_counts(dual_test_id)
+        counts = await db.get_today_method_counts(net_test_id)
         self.assertEqual(counts["total"], 4)
-        self.assertEqual(counts["search"], 2)
-        self.assertEqual(counts["network"], 2)
+        self.assertEqual(counts["network"], 4)
 
-        # Check get_all_profiles has method breakdown fields
+        # Check get_all_profiles has today_sent_count populated
         all_profs = await db.get_all_profiles()
-        dual_prof = next((p for p in all_profs if p["id"] == dual_test_id), None)
-        self.assertIsNotNone(dual_prof)
-        self.assertEqual(dual_prof["today_sent_count"], 4)
-        self.assertEqual(dual_prof["today_search_count"], 2)
-        self.assertEqual(dual_prof["today_network_count"], 2)
+        net_prof = next((p for p in all_profs if p["id"] == net_test_id), None)
+        self.assertIsNotNone(net_prof)
+        self.assertEqual(net_prof["today_sent_count"], 4)
 
-        # Test Recycled Invitations (Sent > 1 week ago withdrawn and resent outside 30 cap)
-        recycle_test_id = "test_recycle_profile"
-        await db.delete_profile(recycle_test_id)
-        await db.create_profile(recycle_test_id, label="Recycle Test Profile", daily_limit=30)
+        await db.delete_profile(net_test_id)
 
-        # Record 2 recycled invitations
-        await db.record_recycled_invitation(
-            recycle_test_id,
-            "https://www.linkedin.com/in/stale-connection-1",
-            name="Stale User 1",
-            resent_success=True
-        )
-        await db.record_recycled_invitation(
-            recycle_test_id,
-            "https://www.linkedin.com/in/stale-connection-2",
-            name="Stale User 2",
-            resent_success=False
-        )
-
-        # Crucial check: today_sent_count MUST remain 0 because recycled invitations are strictly outside the 30 daily cap!
-        recycled_sent_count = await db.get_today_sent_count(recycle_test_id)
-        self.assertEqual(recycled_sent_count, 0)
-
-        # Check method counts
-        r_counts = await db.get_today_method_counts(recycle_test_id)
-        self.assertEqual(r_counts["total"], 0)
-        self.assertEqual(r_counts["recycled"], 2)
-
-        # Check get_all_profiles has today_recycled_count populated
-        all_profs2 = await db.get_all_profiles()
-        rec_prof = next((p for p in all_profs2 if p["id"] == recycle_test_id), None)
-        self.assertIsNotNone(rec_prof)
-        self.assertEqual(rec_prof["today_sent_count"], 0)
-        self.assertEqual(rec_prof["today_recycled_count"], 2)
-
-        await db.delete_profile(recycle_test_id)
 
         # Cleanup
         deleted = await db.delete_profile(test_id)
@@ -242,16 +204,7 @@ class TestBrowserEngine(unittest.TestCase):
         self.assertIsNone(engine.parse_proxy_settings("   "))
         self.assertIsNone(engine.parse_proxy_settings("http://user:pass@proxy.example.com:8080"))
 
-    def test_search_query_pools(self):
-        # Verify search query pools cover leaders, insiders, and HRs
-        self.assertGreaterEqual(len(engine.SEARCH_QUERY_POOLS), 4)
-        all_queries = " ".join(engine.SEARCH_QUERY_POOLS).lower()
-        self.assertIn("vp of engineering", all_queries)
-        self.assertIn("recruiter", all_queries)
-        self.assertIn("principal", all_queries)
-        self.assertIn("cto", all_queries)
-
-    def test_playwright_stealth_and_search_script(self):
+    def test_playwright_stealth_and_network_script(self):
         async def run_test():
             from playwright.async_api import async_playwright
             async with async_playwright() as pw:
@@ -271,76 +224,54 @@ class TestBrowserEngine(unittest.TestCase):
                 self.assertIn("en-US", languages_val)
                 self.assertTrue(has_chrome)
 
-                # Set up HTML mock of LinkedIn search results
+                # Set up HTML mock of LinkedIn My Network recommendations
                 mock_html = """
                 <html><body>
-                    <ul class="search-results-container">
-                        <li class="reusable-search__result-container">
-                            <a class="app-aware-link" href="https://www.linkedin.com/in/john-techleader">John Leader</a>
-                            <div class="entity-result__primary-subtitle">VP of Engineering at Google</div>
-                            <button aria-label="Invite John to connect">Connect</button>
+                    <ul class="discover-entity-type-card-container">
+                        <li class="discover-entity-type-card">
+                            <a class="app-aware-link" href="https://www.linkedin.com/in/alex-founder">
+                                <span class="discover-person-card__name">Alex Tech</span>
+                            </a>
+                            <div class="discover-person-card__occupation">Co-Founder & CTO at AI Startup</div>
+                            <span class="member-insights__count">125 mutual connections</span>
+                            <button aria-label="Invite Alex to connect">Connect</button>
                         </li>
-                        <li class="reusable-search__result-container">
-                            <a class="app-aware-link" href="https://www.linkedin.com/in/sarah-recruiter">Sarah HR</a>
-                            <div class="entity-result__primary-subtitle">Technical Recruiter at Stripe</div>
+                        <li class="discover-entity-type-card">
+                            <a class="app-aware-link" href="https://www.linkedin.com/in/sarah-recruiter">
+                                <span class="discover-person-card__name">Sarah Recruiter</span>
+                            </a>
+                            <div class="discover-person-card__occupation">Technical Recruiter at Google</div>
+                            <span class="member-insights__count">140 mutual connections</span>
                             <button aria-label="Invite Sarah to connect">Connect</button>
+                        </li>
+                        <li class="discover-entity-type-card">
+                            <a class="app-aware-link" href="https://www.linkedin.com/in/david-dev">
+                                <span class="discover-person-card__name">David SWE</span>
+                            </a>
+                            <div class="discover-person-card__occupation">Senior Software Engineer at Meta</div>
+                            <span class="member-insights__count">110 mutual connections</span>
+                            <button aria-label="Invite David to connect">Connect</button>
                         </li>
                     </ul>
                 </body></html>
                 """
                 await page.set_content(mock_html)
 
-                # Evaluate SCRIPT_SCAN_SEARCH_CANDIDATES
-                cands = await page.evaluate(engine.SCRIPT_SCAN_SEARCH_CANDIDATES)
-                self.assertEqual(len(cands), 2)
-                self.assertTrue(any(c["role_category"] == "TECH_LEADER" for c in cands))
-                self.assertTrue(any(c["role_category"] == "TECH_HR" for c in cands))
+                # Evaluate SCRIPT_SCAN_CANDIDATES
+                cands = await page.evaluate(engine.SCRIPT_SCAN_CANDIDATES)
+                self.assertEqual(len(cands), 3)
+                self.assertTrue(any(c["role_category"] == "TECH_FOUNDER" for c in cands))
+                self.assertTrue(any(c["role_category"] == "HR_RECRUITER" for c in cands))
+                self.assertTrue(any(c["role_category"] == "SOFTWARE_ENGINEER" for c in cands))
+                self.assertTrue(all(c["mutual_count"] >= 100 for c in cands))
                 self.assertIsNotNone(cands[0]["btnTag"])
-
-                # Mock Sent Invitations Page (testing stale detection > 1 week ago)
-                mock_sent_html = """
-                <html><body>
-                    <div class="invitation-manager">
-                        <!-- Card 1: 2 weeks ago -> Should be detected -->
-                        <div class="invitation-card" data-view-name="invitation-card">
-                            <a href="https://www.linkedin.com/in/alex-stale-2w">Alex 2w</a>
-                            <time>Sent 2 weeks ago</time>
-                            <button aria-label="Withdraw invitation for Alex 2w">Withdraw</button>
-                        </div>
-                        <!-- Card 2: 1 month ago -> Should be detected -->
-                        <div class="invitation-card" data-view-name="invitation-card">
-                            <a href="https://www.linkedin.com/in/taylor-stale-1m">Taylor 1m</a>
-                            <span>Sent 1 month ago</span>
-                            <button>Withdraw</button>
-                        </div>
-                        <!-- Card 3: 3 days ago -> Should be IGNORED (not > 1 week) -->
-                        <div class="invitation-card" data-view-name="invitation-card">
-                            <a href="https://www.linkedin.com/in/sam-fresh-3d">Sam 3d</a>
-                            <time>Sent 3 days ago</time>
-                            <button>Withdraw</button>
-                        </div>
-                        <!-- Card 4: 1 hour ago -> Should be IGNORED -->
-                        <div class="invitation-card" data-view-name="invitation-card">
-                            <a href="https://www.linkedin.com/in/jordan-fresh-1h">Jordan 1h</a>
-                            <span>Sent 1 hour ago</span>
-                            <button>Withdraw</button>
-                        </div>
-                    </div>
-                </body></html>
-                """
-                await page.set_content(mock_sent_html)
-                stale_items = await page.evaluate(engine.SCRIPT_SCAN_SENT_INVITATIONS)
-                self.assertEqual(len(stale_items), 2)
-                self.assertTrue(any("alex-stale-2w" in item["profile_url"] for item in stale_items))
-                self.assertTrue(any("taylor-stale-1m" in item["profile_url"] for item in stale_items))
-                self.assertFalse(any("sam-fresh-3d" in item["profile_url"] for item in stale_items))
-                self.assertFalse(any("jordan-fresh-1h" in item["profile_url"] for item in stale_items))
 
                 await context.close()
 
                 # Verify profile directory created
                 test_dir = os.path.join(engine.PROFILES_DIR, "smoke_pw_test")
                 self.assertTrue(os.path.exists(test_dir))
+                shutil.rmtree(test_dir, ignore_errors=True)
 
         asyncio.run(run_test())
 
@@ -384,20 +315,6 @@ class TestFastAPIRoutes(unittest.TestCase):
         self.assertIn("today_date", data)
         self.assertIn("profiles", data)
 
-    def test_recycle_endpoint(self):
-        # 1. Non-existent profile returns 404
-        resp404 = self.client.post("/profiles/recycle/nonexistent_profile_id", follow_redirects=False)
-        self.assertEqual(resp404.status_code, 404)
-
-        # 2. Existing profile triggers background task and returns 303 redirect
-        test_id = "test_endpoint_recycle_prof"
-        asyncio.run(db.create_profile(test_id, label="Recycle Endpoint Test"))
-        try:
-            resp303 = self.client.post(f"/profiles/recycle/{test_id}", follow_redirects=False)
-            self.assertEqual(resp303.status_code, 303)
-            self.assertIn("success=", resp303.headers.get("location", ""))
-        finally:
-            asyncio.run(db.delete_profile(test_id))
 
 
 if __name__ == "__main__":

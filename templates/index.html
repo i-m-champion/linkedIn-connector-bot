@@ -159,11 +159,11 @@
                         <div class="flex items-center space-x-2">
                             <h2 class="text-sm font-bold text-white tracking-wide">Daily Automated Auto-Pilot</h2>
                             <span class="px-2 py-0.5 text-[10px] font-bold uppercase rounded-full bg-emerald-500/20 text-emerald-300 border border-emerald-500/30">
-                                50/50 Dual Strategy Active
+                                My Network Direct Active
                             </span>
                         </div>
                         <p class="text-xs text-gray-400 mt-0.5">
-                            Automatically runs daily in background without asking for manual permission. Sends <span class="text-cyan-300 font-semibold">50% via LinkedIn Search</span> (High-Profile Tech Leaders, Tech Insiders & Tech HRs) and <span class="text-emerald-300 font-semibold">50% via My Network</span> (&gt;100 Mutual Connections) up to your daily cap limit. Also withdraws &amp; resends invitations sent <span class="text-purple-300 font-semibold">&gt;1 week ago</span> (outside daily cap limit).
+                            Automatically runs daily in background without asking for manual permission. Sends all connection requests directly through <span class="text-emerald-300 font-semibold">My Network section</span> (&gt;100 Mutual Connections, Tech Founders, HRs, Software Engineers) up to your daily cap limit.
                         </p>
                     </div>
                 </div>
@@ -369,22 +369,13 @@
                                 <div class="h-full rounded-full transition-all duration-500 {% if pct >= 100 %}bg-gradient-to-r from-emerald-500 to-teal-400{% else %}bg-gradient-to-r from-amber-500 to-indigo-500{% endif %}" style="width: {{ pct }}%;"></div>
                             </div>
 
-                            <!-- 50/50 Split Method Breakdown & Recycle Count -->
+                            <!-- Daily Limit Status -->
                             <div class="flex flex-wrap items-center justify-between text-[10px] text-gray-400 px-0.5 pt-0.5 gap-y-1">
-                                <span class="flex items-center space-x-1" title="High-Profile Tech Leaders, Insiders & HRs via LinkedIn Search">
-                                    <span class="w-1.5 h-1.5 rounded-full bg-cyan-400"></span>
-                                    <span>Search: <strong class="text-cyan-300 font-semibold">{{ p.today_search_count or 0 }}</strong>/{{ p.daily_limit // 2 }}</span>
-                                </span>
-                                <span class="flex items-center space-x-1" title=">100 Mutual Connections on My Network">
+                                <span class="flex items-center space-x-1" title="Invitations sent directly via My Network (>100 Mutual Connections)">
                                     <span class="w-1.5 h-1.5 rounded-full bg-emerald-400"></span>
-                                    <span>Network: <strong class="text-emerald-300 font-semibold">{{ p.today_network_count or 0 }}</strong>/{{ p.daily_limit - (p.daily_limit // 2) }}</span>
+                                    <span>My Network: <strong class="text-emerald-300 font-semibold">{{ p.today_sent_count or 0 }}</strong>/{{ p.daily_limit }}</span>
                                 </span>
-                                {% if (p.today_recycled_count or 0) > 0 %}
-                                <span class="flex items-center space-x-1" title="Stale invitations (>1 week ago) withdrawn and resent today (outside the 30 daily cap)">
-                                    <span class="w-1.5 h-1.5 rounded-full bg-purple-400"></span>
-                                    <span>Recycled (>1w): <strong class="text-purple-300 font-semibold">{{ p.today_recycled_count or 0 }}</strong></span>
-                                </span>
-                                {% endif %}
+                                <span class="text-gray-500 text-[10px]">{{ [p.daily_limit - (p.today_sent_count or 0), 0]|max }} remaining</span>
                             </div>
 
                             <!-- Progress / Queue Pill Counters -->
@@ -435,12 +426,6 @@
                                         </button>
                                     </form>
 
-                                    <!-- Recycle Stale (>1W) Invitations -->
-                                    <form action="/profiles/recycle/{{ p.id }}" method="POST" class="inline" onsubmit="return confirm('Check Sent Invitations section for invitations sent > 1 week ago, withdraw them, and resend them? Note: This does NOT count towards the daily cap.');">
-                                        <button type="submit" {% if p.status != 'idle' %}disabled class="opacity-40 cursor-not-allowed px-2.5 py-1 rounded bg-gray-800 text-gray-400 text-xs"{% else %}class="px-2.5 py-1 rounded bg-purple-900/40 hover:bg-purple-900/60 text-purple-300 border border-purple-700/50 text-xs flex items-center space-x-1.5 transition shadow-sm font-medium"{% endif %} title="Go to Sent Invitations, withdraw invitations older than 1 week, and resend them (outside daily cap)">
-                                            <span>♻️ Recycle Stale (&gt;1W)</span>
-                                        </button>
-                                    </form>
                                 </div>
 
                                 <div class="flex items-center space-x-1.5">
@@ -622,8 +607,6 @@
                                                 <span class="px-1.5 py-0.5 rounded text-[9px] font-semibold bg-cyan-950/80 text-cyan-300 border border-cyan-800/70 mr-1 shadow-sm">Search</span>
                                                 {% elif 'mutual' in item.message_text %}
                                                 <span class="px-1.5 py-0.5 rounded text-[9px] font-semibold bg-emerald-950/80 text-emerald-300 border border-emerald-800/70 mr-1 shadow-sm">Network</span>
-                                                {% elif 'Recycled' in item.message_text or 'Withdrawn' in item.message_text %}
-                                                <span class="px-1.5 py-0.5 rounded text-[9px] font-semibold bg-purple-950/80 text-purple-300 border border-purple-800/70 mr-1 shadow-sm">Recycled</span>
                                                 {% endif %}
                                                 <span class="text-gray-300">{{ item.message_text }}</span>
                                             {% else %}

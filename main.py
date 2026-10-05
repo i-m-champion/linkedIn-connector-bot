@@ -7,6 +7,7 @@ interactive authentication sessions, and background automated worker batches.
 import os
 import csv
 import io
+import asyncio
 import logging
 from typing import Optional
 from contextlib import asynccontextmanager
@@ -239,9 +240,7 @@ async def trigger_auto_send_session(
     background_tasks: BackgroundTasks
 ):
     """
-    Triggers the 50/50 dual-strategy connection session:
-    - 50% via LinkedIn Search (High-Profile Tech Leaders, Tech Insiders, Tech HRs)
-    - 50% via My Network (100+ Mutual Connections)
+    Triggers the connection session directly through My Network section (>100 Mutual Connections).
     """
     profile = await db.get_profile(target_profile_id)
     if not profile:
@@ -262,56 +261,11 @@ async def trigger_auto_send_session(
     )
 
     return RedirectResponse(
-        url=f"/?success=Auto-sending+50/50+connection+invitations+(Search+&+Network)+for+{target_profile_id}...", 
+        url=f"/?success=Auto-sending+connection+invitations+via+My+Network+(>100+Mutual+Connections)+for+{target_profile_id}...", 
         status_code=303
     )
 
 
-@app.post("/profiles/recycle/{target_profile_id}")
-async def trigger_recycle_stale_invitations(
-    target_profile_id: str,
-    background_tasks: BackgroundTasks
-):
-    """
-    Directly navigates to LinkedIn 'Sent Invitations' section, locates invitations sent
-    more than 1 week ago, withdraws them, and resends them (outside of the 30 daily cap).
-    """
-    profile = await db.get_profile(target_profile_id)
-    if not profile:
-        raise HTTPException(status_code=404, detail="Profile not found")
-
-    if profile["status"] != "idle":
-        return RedirectResponse(
-            url=f"/?error=Profile+{target_profile_id}+is+currently+{profile['status']}", 
-            status_code=303
-        )
-
-    async def run_recycle_worker():
-        await db.update_profile_status(target_profile_id, "running")
-        try:
-            context, pw_instance, is_new = await engine.get_or_create_context(
-                profile_id=target_profile_id,
-                headless=False,
-                proxy_url=profile.get("proxy_url")
-            )
-            page = await context.new_page()
-            await page.bring_to_front()
-            await engine.withdraw_and_resend_stale_invitations(page, target_profile_id, max_recycle=25)
-            try:
-                await page.close()
-            except Exception:
-                pass
-        except Exception as e:
-            logger.error(f"Error in recycle worker for {target_profile_id}: {e}", exc_info=True)
-        finally:
-            await db.update_profile_status(target_profile_id, "idle", update_last_run=True)
-
-    background_tasks.add_task(run_recycle_worker)
-
-    return RedirectResponse(
-        url=f"/?success=Checking+and+recycling+stale+invitations+(>1+week+old)+for+{target_profile_id}...", 
-        status_code=303
-    )
 
 
 # ==========================================
