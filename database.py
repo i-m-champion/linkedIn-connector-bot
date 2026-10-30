@@ -120,9 +120,10 @@ async def get_all_profiles() -> List[Dict[str, Any]]:
                 COUNT(CASE WHEN q.status = 'pending' THEN 1 END) AS pending_count,
                 COUNT(CASE WHEN q.status = 'completed' THEN 1 END) AS completed_count,
                 COUNT(CASE WHEN q.status = 'failed' THEN 1 END) AS failed_count,
-                COUNT(CASE WHEN q.status = 'completed' AND (q.processed_at LIKE ? OR (q.processed_at IS NULL AND q.created_at LIKE ?)) THEN 1 END) AS today_sent_count,
-                COUNT(CASE WHEN q.status = 'completed' AND (q.processed_at LIKE ? OR (q.processed_at IS NULL AND q.created_at LIKE ?)) AND (q.message_text LIKE '%LinkedIn Search%' OR q.message_text LIKE '%[Search]%') THEN 1 END) AS today_search_count,
-                COUNT(CASE WHEN q.status = 'completed' AND (q.processed_at LIKE ? OR (q.processed_at IS NULL AND q.created_at LIKE ?)) AND (q.message_text NOT LIKE '%LinkedIn Search%' AND q.message_text NOT LIKE '%[Search]%') THEN 1 END) AS today_network_count,
+                COUNT(CASE WHEN q.status = 'completed' AND (q.message_text IS NULL OR q.message_text NOT LIKE 'Accepted incoming%') AND (q.processed_at LIKE ? OR (q.processed_at IS NULL AND q.created_at LIKE ?)) THEN 1 END) AS today_sent_count,
+                COUNT(CASE WHEN q.status = 'completed' AND (q.message_text IS NULL OR q.message_text NOT LIKE 'Accepted incoming%') AND (q.processed_at LIKE ? OR (q.processed_at IS NULL AND q.created_at LIKE ?)) AND (q.message_text LIKE '%LinkedIn Search%' OR q.message_text LIKE '%[Search]%') THEN 1 END) AS today_search_count,
+                COUNT(CASE WHEN q.status = 'completed' AND (q.message_text IS NULL OR q.message_text NOT LIKE 'Accepted incoming%') AND (q.processed_at LIKE ? OR (q.processed_at IS NULL AND q.created_at LIKE ?)) AND (q.message_text NOT LIKE '%LinkedIn Search%' AND q.message_text NOT LIKE '%[Search]%') THEN 1 END) AS today_network_count,
+                COUNT(CASE WHEN q.status = 'completed' AND q.message_text LIKE 'Accepted incoming%' AND (q.processed_at LIKE ? OR (q.processed_at IS NULL AND q.created_at LIKE ?)) THEN 1 END) AS today_accepted_count,
                 COUNT(q.id) AS total_count
             FROM profiles p
             LEFT JOIN queue_items q ON p.id = q.profile_id
@@ -130,6 +131,7 @@ async def get_all_profiles() -> List[Dict[str, Any]]:
             ORDER BY p.created_at DESC
         """
         cursor = await conn.execute(query, (
+            today_pattern, today_pattern,
             today_pattern, today_pattern,
             today_pattern, today_pattern,
             today_pattern, today_pattern
@@ -236,7 +238,7 @@ async def record_daily_auto_run_completed(profile_id: str, run_date: str) -> Non
 
 
 async def get_today_sent_count(profile_id: str, date_str: Optional[str] = None) -> int:
-    """Retrieves the exact count of successful connection invitations sent today for a given profile."""
+    """Retrieves the exact count of successful connection invitations sent today for a given profile (excluding accepted incoming invitations)."""
     if not date_str:
         date_str = datetime.now().strftime("%Y-%m-%d")
     pattern = f"{date_str}%"
@@ -247,6 +249,7 @@ async def get_today_sent_count(profile_id: str, date_str: Optional[str] = None) 
             FROM queue_items 
             WHERE profile_id = ? 
               AND status = 'completed' 
+              AND (message_text IS NULL OR message_text NOT LIKE 'Accepted incoming%')
               AND (processed_at LIKE ? OR (processed_at IS NULL AND created_at LIKE ?))
             """,
             (profile_id, pattern, pattern)
@@ -399,6 +402,48 @@ async def record_sent_connection(
                 (profile_id, clean_target, note_text, now_ts)
             )
         await conn.commit()
+
+
+async def record_accepted_connection(
+    profile_id: str, 
+    sender_name: Optional[str] = None, 
+    sender_url: Optional[str] = None
+) -> None:
+    """Records that a received connection invitation was automatically accepted."""
+    clean_target = sender_url.strip().rstrip("/") if sender_url else f"https://www.linkedin.com/in/accepted-{int(datetime.now().timestamp())}"
+    note_text = f"Accepted incoming invitation: {sender_name or 'Member'}"
+    now_ts = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+
+    async with get_db() as conn:
+        await conn.execute(
+            """
+            INSERT INTO queue_items (profile_id, target_url, message_text, status, error_message, processed_at)
+            VALUES (?, ?, ?, 'completed', 'Incoming invitation accepted', ?)
+            """,
+            (profile_id, clean_target, note_text, now_ts)
+        )
+        await conn.commit()
+
+
+async def get_today_accepted_count(profile_id: str, date_str: Optional[str] = None) -> int:
+    """Retrieves the count of received invitations accepted today for a profile."""
+    if not date_str:
+        date_str = datetime.now().strftime("%Y-%m-%d")
+    pattern = f"{date_str}%"
+    async with get_db() as conn:
+        cursor = await conn.execute(
+            """
+            SELECT COUNT(*) AS accepted_today 
+            FROM queue_items 
+            WHERE profile_id = ? 
+              AND status = 'completed' 
+              AND message_text LIKE 'Accepted incoming%'
+              AND (processed_at LIKE ? OR (processed_at IS NULL AND created_at LIKE ?))
+            """,
+            (profile_id, pattern, pattern)
+        )
+        row = await cursor.fetchone()
+        return row["accepted_today"] if row else 0
 
 
 async def get_sent_urls_for_profile(profile_id: str) -> List[str]:

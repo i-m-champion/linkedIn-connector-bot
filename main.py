@@ -190,6 +190,45 @@ async def delete_profile(target_profile_id: str):
     return RedirectResponse(url="/?success=Profile+deleted", status_code=303)
 
 
+@app.post("/profiles/reset/{target_profile_id}")
+async def reset_profile_route(
+    target_profile_id: str,
+    request: Request
+):
+    """Emergency reset/unlock for a profile stuck in running or authenticating state."""
+    profile = await db.get_profile(target_profile_id)
+    if not profile:
+        raise HTTPException(status_code=404, detail="Profile not found")
+
+    await engine.close_session(target_profile_id)
+    engine.kill_stale_profile_locks(target_profile_id)
+    await db.update_profile_status(target_profile_id, "idle")
+
+    logger.info(f"Unlocked profile '{target_profile_id}' back to idle.")
+
+    if "application/json" in request.headers.get("accept", ""):
+        return JSONResponse({"success": True, "message": f"Profile '{target_profile_id}' unlocked and reset to idle."})
+
+    return RedirectResponse(
+        url=f"/?success=Profile+{target_profile_id}+has+been+unlocked+and+reset+to+idle.", 
+        status_code=303
+    )
+
+
+@app.post("/api/profiles/reset/{target_profile_id}")
+async def api_reset_profile_route(target_profile_id: str):
+    """API endpoint to unlock and reset a profile back to idle."""
+    profile = await db.get_profile(target_profile_id)
+    if not profile:
+        raise HTTPException(status_code=404, detail="Profile not found")
+
+    await engine.close_session(target_profile_id)
+    engine.kill_stale_profile_locks(target_profile_id)
+    await db.update_profile_status(target_profile_id, "idle")
+
+    return {"success": True, "message": f"Profile '{target_profile_id}' unlocked and reset to idle."}
+
+
 # ==========================================
 # Automation & Authentication Triggers
 # ==========================================
@@ -201,9 +240,9 @@ async def trigger_auth_session(
     start_url: Optional[str] = Form(None)
 ):
     """
-    Launches or focuses a visible browser session in a new tab:
-    - Automatically opens in a new tab in the active browser window.
-    - Monitors login and automatically queues profiles with >100 mutual connections.
+    Launches a visible (headed) browser session for operator login/verification:
+    - Opens Google Chrome / Chromium window for manual login, 2FA, or CAPTCHA resolution.
+    - Updates status to 'authenticating' while waiting for login.
     """
     profile = await db.get_profile(target_profile_id)
     if not profile:
@@ -221,14 +260,16 @@ async def trigger_auth_session(
         engine.open_interactive_session,
         profile_id=target_profile_id,
         start_url=start_url.strip() if start_url and start_url.strip() else None,
-        timeout_seconds=360
+        timeout_seconds=360,
+        auto_connect=False,
+        headless=False
     )
 
     if "application/json" in request.headers.get("accept", ""):
-        return JSONResponse({"success": True, "message": f"Opening new tab for {target_profile_id}..."})
+        return JSONResponse({"success": True, "message": f"Opening login window for {target_profile_id}..."})
 
     return RedirectResponse(
-        url=f"/?success=Browser+session+opened+in+new+tab+for+{target_profile_id}.+Log+in+to+auto-queue+profiles+with+>100+mutual+connections!", 
+        url=f"/?success=Browser+login+window+opened+for+{target_profile_id}.+Please+sign+in+to+verify+your+LinkedIn+session.", 
         status_code=303
     )
 
@@ -240,7 +281,7 @@ async def trigger_auto_send_session(
     background_tasks: BackgroundTasks
 ):
     """
-    Triggers the connection session directly through My Network section (>100 Mutual Connections).
+    Triggers the connection session directly through My Network section silently in the background (headless).
     """
     profile = await db.get_profile(target_profile_id)
     if not profile:
@@ -257,11 +298,45 @@ async def trigger_auto_send_session(
         profile_id=target_profile_id,
         start_url="https://www.linkedin.com/mynetwork/grow/",
         timeout_seconds=360,
-        auto_connect=True
+        auto_connect=True,
+        headless=True
     )
 
     return RedirectResponse(
-        url=f"/?success=Auto-sending+connection+invitations+via+My+Network+(>100+Mutual+Connections)+for+{target_profile_id}...", 
+        url=f"/?success=Sending+connection+invitations+silently+in+background+(headless)+for+{target_profile_id}...", 
+        status_code=303
+    )
+
+
+@app.post("/profiles/accept-invitations/{target_profile_id}")
+async def trigger_accept_invitations(
+    target_profile_id: str,
+    background_tasks: BackgroundTasks
+):
+    """
+    Triggers an immediate background session (headless) to check and accept all pending incoming connection invitations.
+    """
+    profile = await db.get_profile(target_profile_id)
+    if not profile:
+        raise HTTPException(status_code=404, detail="Profile not found")
+
+    if profile["status"] != "idle":
+        return RedirectResponse(
+            url=f"/?error=Profile+{target_profile_id}+is+currently+{profile['status']}", 
+            status_code=303
+        )
+
+    background_tasks.add_task(
+        engine.open_interactive_session,
+        profile_id=target_profile_id,
+        start_url="https://www.linkedin.com/mynetwork/invitation-manager/",
+        timeout_seconds=360,
+        auto_connect=True,
+        headless=True
+    )
+
+    return RedirectResponse(
+        url=f"/?success=Accepting+pending+invitations+silently+in+background+(headless)+for+{target_profile_id}...", 
         status_code=303
     )
 
@@ -339,7 +414,7 @@ async def trigger_immediate_daily_run(
 async def trigger_profile_run(
     target_profile_id: str,
     background_tasks: BackgroundTasks,
-    headless: bool = Form(False)
+    headless: bool = Form(True)
 ):
     """
     Launches worker batch processing for pending queue items

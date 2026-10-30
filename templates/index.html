@@ -163,7 +163,7 @@
                             </span>
                         </div>
                         <p class="text-xs text-gray-400 mt-0.5">
-                            Automatically runs daily in background without asking for manual permission. Sends all connection requests directly through <span class="text-emerald-300 font-semibold">My Network section</span> (&gt;100 Mutual Connections, Tech Founders, HRs, Software Engineers) up to your daily cap limit.
+                            Automatically runs daily in background without asking for manual permission. Automatically accepts all pending incoming invitations, and sends connection requests directly through <span class="text-emerald-300 font-semibold">My Network section</span> (&gt;100 Mutual Connections, Tech Founders, HRs, Software Engineers) up to your daily cap limit.
                         </p>
                     </div>
                 </div>
@@ -375,6 +375,12 @@
                                     <span class="w-1.5 h-1.5 rounded-full bg-emerald-400"></span>
                                     <span>My Network: <strong class="text-emerald-300 font-semibold">{{ p.today_sent_count or 0 }}</strong>/{{ p.daily_limit }}</span>
                                 </span>
+                                {% if (p.today_accepted_count or 0) > 0 %}
+                                <span class="flex items-center space-x-1" title="Incoming connection invitations automatically accepted today">
+                                    <span class="w-1.5 h-1.5 rounded-full bg-blue-400"></span>
+                                    <span>Accepted: <strong class="text-blue-300 font-semibold">{{ p.today_accepted_count or 0 }}</strong></span>
+                                </span>
+                                {% endif %}
                                 <span class="text-gray-500 text-[10px]">{{ [p.daily_limit - (p.today_sent_count or 0), 0]|max }} remaining</span>
                             </div>
 
@@ -416,6 +422,13 @@
                                         </button>
                                     </form>
 
+                                    <!-- Accept Pending Invitations -->
+                                    <form action="/profiles/accept-invitations/{{ p.id }}" method="POST" class="inline">
+                                        <button type="submit" {% if p.status != 'idle' %}disabled class="opacity-40 cursor-not-allowed px-2.5 py-1 rounded bg-gray-800 text-gray-400 text-xs"{% else %}class="px-2.5 py-1 rounded bg-blue-600/20 hover:bg-blue-600/30 text-blue-300 border border-blue-500/30 text-xs flex items-center space-x-1.5 transition shadow-sm font-semibold"{% endif %} title="Check and automatically accept all pending incoming connection invitations">
+                                            <span>📥 Accept Pending</span>
+                                        </button>
+                                    </form>
+
                                     <!-- Interactive Login (Opens in New Tab) -->
                                     <form action="/profiles/auth/{{ p.id }}" method="POST" class="inline">
                                         <button type="submit" {% if p.status != 'idle' %}disabled class="opacity-40 cursor-not-allowed px-2.5 py-1 rounded bg-gray-800 text-gray-400 text-xs"{% else %}class="px-2.5 py-1 rounded bg-purple-600/20 hover:bg-purple-600/30 text-purple-300 border border-purple-500/30 text-xs flex items-center space-x-1.5 transition shadow-sm"{% endif %} title="Opens in new browser tab to check/verify LinkedIn authentication.">
@@ -425,6 +438,16 @@
                                             <span class="font-medium">Headed Login</span>
                                         </button>
                                     </form>
+
+                                    <!-- Emergency Unlock / Reset button if profile is stuck -->
+                                    {% if p.status != 'idle' %}
+                                    <form action="/profiles/reset/{{ p.id }}" method="POST" class="inline">
+                                        <button type="submit" class="px-2.5 py-1 rounded bg-amber-500/20 hover:bg-amber-500/30 text-amber-300 border border-amber-500/40 text-xs flex items-center space-x-1.5 transition shadow-sm font-semibold animate-pulse" title="Unlock and reset this profile back to Idle">
+                                            <svg class="w-3.5 h-3.5 text-amber-400" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M4 4v5h.582m15.356 2A8.001 8.001 0 004.582 9m0 0H9m11 11v-5h-.581m0 0a8.003 8.003 0 01-15.357-2m15.357 2H15"/></svg>
+                                            <span>Unlock / Reset</span>
+                                        </button>
+                                    </form>
+                                    {% endif %}
 
                                 </div>
 
@@ -605,6 +628,8 @@
                                             {% elif item.message_text %}
                                                 {% if 'LinkedIn Search' in item.message_text or '[Search]' in item.message_text %}
                                                 <span class="px-1.5 py-0.5 rounded text-[9px] font-semibold bg-cyan-950/80 text-cyan-300 border border-cyan-800/70 mr-1 shadow-sm">Search</span>
+                                                {% elif 'Accepted incoming' in item.message_text %}
+                                                <span class="px-1.5 py-0.5 rounded text-[9px] font-semibold bg-blue-950/80 text-blue-300 border border-blue-800/70 mr-1 shadow-sm">Accepted</span>
                                                 {% elif 'mutual' in item.message_text %}
                                                 <span class="px-1.5 py-0.5 rounded text-[9px] font-semibold bg-emerald-950/80 text-emerald-300 border border-emerald-800/70 mr-1 shadow-sm">Network</span>
                                                 {% endif %}

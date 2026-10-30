@@ -119,6 +119,13 @@ class TestDatabaseLayer(unittest.IsolatedAsyncioTestCase):
         prof_st = await db.get_profile(ap_test_id)
         self.assertEqual(prof_st["status"], "idle")
 
+        # Test auto_heal_stuck_profiles watchdog
+        import scheduler
+        await db.update_profile_status(ap_test_id, "authenticating")
+        await scheduler.auto_heal_stuck_profiles()
+        prof_healed = await db.get_profile(ap_test_id)
+        self.assertEqual(prof_healed["status"], "idle")
+
         # Toggle auto-pilot off
         await db.update_profile_auto_pilot(ap_test_id, auto_pilot=0)
         due_off = await db.get_auto_pilot_due_profiles(current_hour=10, today_str="2026-10-03")
@@ -167,11 +174,21 @@ class TestDatabaseLayer(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(counts["total"], 4)
         self.assertEqual(counts["network"], 4)
 
-        # Check get_all_profiles has today_sent_count populated
+        # Test recording accepted incoming connection
+        await db.record_accepted_connection(net_test_id, sender_name="Incoming John", sender_url="https://www.linkedin.com/in/incoming-john")
+        accepted_today = await db.get_today_accepted_count(net_test_id)
+        self.assertEqual(accepted_today, 1)
+
+        # Verify today_sent_count is still 4 (accepted invitations do not consume outgoing daily cap)
+        sent_today = await db.get_today_sent_count(net_test_id)
+        self.assertEqual(sent_today, 4)
+
+        # Check get_all_profiles has today_sent_count and today_accepted_count populated
         all_profs = await db.get_all_profiles()
         net_prof = next((p for p in all_profs if p["id"] == net_test_id), None)
         self.assertIsNotNone(net_prof)
         self.assertEqual(net_prof["today_sent_count"], 4)
+        self.assertEqual(net_prof["today_accepted_count"], 1)
 
         await db.delete_profile(net_test_id)
 
@@ -266,6 +283,32 @@ class TestBrowserEngine(unittest.TestCase):
                 self.assertTrue(all(c["mutual_count"] >= 100 for c in cands))
                 self.assertIsNotNone(cands[0]["btnTag"])
 
+                # Evaluate SCRIPT_SCAN_ACCEPT_BUTTONS on mock received invitations
+                mock_invitations_html = """
+                <html><body>
+                    <ul class="artdeco-list">
+                        <li class="invitation-card">
+                            <a href="https://www.linkedin.com/in/alice-incoming">
+                                <span class="invitation-card__title">Alice Wonder</span>
+                            </a>
+                            <button aria-label="Accept Alice Wonder's invitation">Accept</button>
+                        </li>
+                        <li class="invitation-card">
+                            <a href="https://www.linkedin.com/in/bob-incoming">
+                                <span class="invitation-card__title">Bob Builder</span>
+                            </a>
+                            <button class="invitation-card__action-btn--accept">Accept</button>
+                        </li>
+                    </ul>
+                </body></html>
+                """
+                await page.set_content(mock_invitations_html)
+                accept_btns = await page.evaluate(engine.SCRIPT_SCAN_ACCEPT_BUTTONS)
+                self.assertEqual(len(accept_btns), 2)
+                self.assertEqual(accept_btns[0]["name"], "Alice Wonder")
+                self.assertEqual(accept_btns[1]["name"], "Bob Builder")
+                self.assertIsNotNone(accept_btns[0]["tag"])
+
                 await context.close()
 
                 # Verify profile directory created
@@ -314,6 +357,27 @@ class TestFastAPIRoutes(unittest.TestCase):
         data = response.json()
         self.assertIn("today_date", data)
         self.assertIn("profiles", data)
+
+    def test_reset_profile_endpoint(self):
+        # Create a test profile in running status and test the reset endpoint
+        test_id = "test_reset_route_prof"
+        asyncio.run(db.delete_profile(test_id))
+        asyncio.run(db.create_profile(profile_id=test_id, label="Reset Test", daily_limit=10))
+        asyncio.run(db.update_profile_status(test_id, "running"))
+
+        # Verify status is running
+        p = asyncio.run(db.get_profile(test_id))
+        self.assertEqual(p["status"], "running")
+
+        # Test POST /api/profiles/reset/{id}
+        resp = self.client.post(f"/api/profiles/reset/{test_id}")
+        self.assertEqual(resp.status_code, 200)
+        self.assertTrue(resp.json()["success"])
+
+        # Verify status reset to idle
+        p_after = asyncio.run(db.get_profile(test_id))
+        self.assertEqual(p_after["status"], "idle")
+        asyncio.run(db.delete_profile(test_id))
 
 
 

@@ -244,26 +244,31 @@ def kill_stale_profile_locks(profile_id: str) -> None:
         logger.warning(f"Could not clear profile locks for {profile_id}: {e}")
 
 
-async def get_or_create_context(profile_id: str, headless: bool = False, proxy_url: Optional[str] = None):
+async def get_or_create_context(profile_id: str, headless: bool = True, proxy_url: Optional[str] = None):
     """
-    Retrieves the existing open browser context for this profile if still alive,
+    Retrieves the existing open browser context for this profile if still alive and matching requested headless mode,
     or launches a new persistent context.
     """
     if profile_id in ACTIVE_SESSIONS:
         session = ACTIVE_SESSIONS[profile_id]
         ctx = session.get("context")
+        existing_headless = session.get("headless")
         try:
-            if ctx:
+            if ctx and not ctx.is_closed() and (existing_headless is None or existing_headless == headless):
                 _ = ctx.pages
                 return ctx, session.get("playwright"), False
         except Exception as stale_err:
             logger.info(f"Stale session detected for '{profile_id}': {stale_err}. Re-launching context...")
-            ACTIVE_SESSIONS.pop(profile_id, None)
+        
+        # Purge stale, closed, or mismatched mode session
+        await close_session(profile_id)
 
     pw = await async_playwright().start()
     try:
         ctx = await launch_profile_context(pw, profile_id=profile_id, headless=headless, proxy_url=proxy_url)
-        ACTIVE_SESSIONS[profile_id] = {"context": ctx, "playwright": pw}
+        # Register close listener so ACTIVE_SESSIONS automatically purges when the browser is closed
+        ctx.on("close", lambda: ACTIVE_SESSIONS.pop(profile_id, None))
+        ACTIVE_SESSIONS[profile_id] = {"context": ctx, "playwright": pw, "headless": headless}
         return ctx, pw, True
     except Exception as e:
         await pw.stop()
@@ -292,7 +297,8 @@ async def close_session(profile_id: str):
 # 3. Current Software Engineers & Technical Leaders at Good Tech companies
 # Prioritizing candidates with >= 100 mutual connections and big tech experience.
 SCRIPT_SCAN_CANDIDATES = r"""
-(() => {
+((minMutual) => {
+    minMutual = (typeof minMutual === "number") ? minMutual : 10;
     // Regex patterns for matching connections count:
     const r1 = /([\d,]+)\s*\+?\s*(?:others?\s+)?(?:mutual(?:\s+connections?)?|connections?\s+in\s+common|in\s+common|connections?)/i;
     const r2 = /(?:mutual(?:\s+connections?)?|connections?\s+in\s+common|in\s+common|connections?)[\s:]+([\d,]+)/i;
@@ -430,9 +436,9 @@ SCRIPT_SCAN_CANDIDATES = r"""
         const quality = evaluateCandidateQuality(occupation, cardText);
         if (!quality) return; // Strict quality check: Skip non-tech or unrelated professions!
 
-        // 5. Connection count extraction (require at least 50 mutual connections, boost for >= 100)
+        // 5. Connection count extraction (require at least minMutual connections, boost for >= 100)
         const count = extractCount(cardText);
-        if (count < 50) return;
+        if (count < minMutual && !(count >= 3 && (quality.isBigTech || quality.category === "TECH_FOUNDER"))) return;
 
         // 6. Find connect button if not already provided
         let connectBtn = knownBtn;
@@ -547,7 +553,7 @@ SCRIPT_SCAN_CANDIDATES = r"""
         if (!txt || txt.length > 150) continue;
         const low = txt.toLowerCase();
         if (!low.includes('connection') && !low.includes('mutual') && !low.includes('common')) continue;
-        if (extractCount(txt) >= 50) {
+        if (extractCount(txt) >= minMutual) {
             let p = el.parentElement;
             while (p && p !== document.body) {
                 if (p.querySelector('a[href*="/in/"]')) {
@@ -563,7 +569,7 @@ SCRIPT_SCAN_CANDIDATES = r"""
     // Sort strictly by highest quality score: Tech Founders & Big Tech SWEs/HRs with >= 100 connections first!
     candidates.sort((a, b) => b.quality_score - a.quality_score);
     return candidates;
-})()
+})(typeof arguments !== "undefined" && arguments.length > 0 && typeof arguments[0] === "number" ? arguments[0] : 10)
 """
 
 async def send_candidate_invitation(page: Page, cand: Dict[str, Any]) -> str:
@@ -622,7 +628,7 @@ async def send_candidate_invitation(page: Page, cand: Dict[str, Any]) -> str:
         return "FAILED"
 
     # Micro delay to allow modal or status change to register
-    await asyncio.sleep(random.uniform(0.5, 0.8))
+    await asyncio.sleep(random.uniform(0.2, 0.4))
 
     # 3. Handle modal if one popped up
     # Modal A: "Send without a note" or "Send now" or "Send"
@@ -645,7 +651,7 @@ async def send_candidate_invitation(page: Page, cand: Dict[str, Any]) -> str:
         }""")
         if modal_handled:
             logger.info("Clicked 'Send without a note' in modal dialog")
-            await asyncio.sleep(0.4)
+            await asyncio.sleep(0.2)
     except Exception:
         pass
 
@@ -795,13 +801,22 @@ async def auto_send_network_invitations(
                 logger.debug(f"See all check: {e}")
 
             # Loop up to 60 scroll/pagination passes on the Network page
+            curr_min_mutual = min_mutual
             consecutive_empty_scrolls = 0
             for scroll_idx in range(60):
                 if total_sent_today >= target_cap:
                     logger.info(f"🎯 Network target reached ({total_sent_today}/{target_cap} sent today).")
                     break
 
-                candidates = await page.evaluate(SCRIPT_SCAN_CANDIDATES)
+                # Tiered adaptive threshold: expand search if candidates run low
+                if consecutive_empty_scrolls >= 5 and curr_min_mutual > 15:
+                    curr_min_mutual = 15
+                    logger.info(f"⚡ Expanding network search threshold to >={curr_min_mutual} mutual connections...")
+                elif consecutive_empty_scrolls >= 12 and curr_min_mutual > 5:
+                    curr_min_mutual = 5
+                    logger.info(f"⚡ Expanding network search threshold to >={curr_min_mutual} mutual connections to fulfill daily cap...")
+
+                candidates = await page.evaluate(SCRIPT_SCAN_CANDIDATES, curr_min_mutual)
                 new_cands = [c for c in candidates if c.get("url", "").rstrip("/") not in attempted_urls]
 
                 if new_cands:
@@ -843,11 +858,11 @@ async def auto_send_network_invitations(
                             logger.info(f"✓ [{total_sent_today}/{target_cap} sent today] Sent invitation to {cand['name']} ({cand['mutual_count']} connections){role_tag}{sec_tag}")
                             if total_sent_today >= target_cap:
                                 break
-                            cooldown = random.uniform(1.0, 1.8)
+                            cooldown = random.uniform(0.6, 1.2)
                             await asyncio.sleep(cooldown)
                 else:
                     consecutive_empty_scrolls += 1
-                    if consecutive_empty_scrolls >= 25:
+                    if consecutive_empty_scrolls >= 35:
                         logger.info(f"No new candidates found after {consecutive_empty_scrolls} consecutive scrolls on {net_url}. Moving to next view.")
                         break
 
@@ -860,7 +875,7 @@ async def auto_send_network_invitations(
                         const main = document.querySelector('main, .scaffold-layout__main, #main');
                         if (main) main.scrollTop += 1400;
                     }""")
-                    await asyncio.sleep(1.0)
+                    await asyncio.sleep(0.4)
                 except Exception:
                     pass
 
@@ -925,21 +940,217 @@ async def auto_send_dual_strategy_invitations(
     )
 
 
+
+# Client-side script that scans the DOM for pending incoming invitation cards with "Accept" buttons
+SCRIPT_SCAN_ACCEPT_BUTTONS = r"""
+(() => {
+    const results = [];
+    let idx = Date.now();
+
+    // Scan all buttons on page
+    const allButtons = document.querySelectorAll('button, [role="button"]');
+    for (const b of allButtons) {
+        if (!b || b.disabled) continue;
+        const txt = (b.innerText || b.textContent || '').trim().toLowerCase();
+        const aria = (b.getAttribute('aria-label') || '').toLowerCase();
+
+        // Skip ignored, disabled, or already accepted buttons
+        if (txt.includes('accepted') || aria.includes('accepted')) continue;
+        if (txt.includes('ignore') || aria.includes('ignore')) continue;
+        if (txt.includes('withdraw') || aria.includes('withdraw')) continue;
+
+        // Match Accept buttons
+        const isAccept = (txt === 'accept' || 
+                          txt.startsWith('accept ') || 
+                          aria.startsWith('accept ') || 
+                          aria.includes('accept invitation') ||
+                          b.classList.contains('invitation-card__action-btn--accept') ||
+                          b.getAttribute('data-control-name') === 'accept');
+
+        if (isAccept) {
+            // Find parent card / container
+            let card = b.closest('li') || 
+                       b.closest('.invitation-card') || 
+                       b.closest('.artdeco-list__item') || 
+                       b.closest('[data-view-name*="invitation"]') || 
+                       b.closest('.invitation-card__details') ||
+                       b.parentElement?.parentElement;
+
+            let name = 'Member';
+            let profileUrl = '';
+
+            if (card) {
+                const nameEl = card.querySelector('.invitation-card__title, .invitation-card__name, .artdeco-entity-lockup__title, a[href*="/in/"], h3, span[aria-hidden="true"]');
+                if (nameEl) {
+                    const extracted = (nameEl.innerText || nameEl.textContent || '').trim().split('\n')[0];
+                    if (extracted && extracted.length < 60) name = extracted;
+                }
+                const linkEl = card.querySelector('a[href*="/in/"]');
+                if (linkEl && linkEl.href) {
+                    profileUrl = linkEl.href.split('?')[0].split('#')[0].replace(/\/$/, '');
+                }
+            }
+
+            if (name === 'Member' && aria) {
+                const m = aria.match(/accept\s+([^']+?)(?:'s)?\s+invitation/i);
+                if (m && m[1]) name = m[1].trim();
+            }
+
+            idx++;
+            const tag = 'ac-accept-' + idx;
+            b.setAttribute('data-ac-accept', tag);
+            results.push({
+                tag: tag,
+                name: name,
+                profileUrl: profileUrl
+            });
+        }
+    }
+    return results;
+})()
+"""
+
+
+async def auto_accept_pending_invitations(page: Page, profile_id: str) -> int:
+    """
+    Navigates to LinkedIn's Received Invitations section and automatically
+    accepts all pending incoming connection invitations.
+    Returns: Total count of invitations accepted in this run.
+    """
+    invitations_url = "https://www.linkedin.com/mynetwork/invitation-manager/"
+    logger.info(f"Checking for pending incoming invitations for '{profile_id}' at {invitations_url}...")
+    accepted_count = 0
+
+    try:
+        current_url = page.url.lower()
+        if "invitation-manager" not in current_url:
+            await page.goto(invitations_url, wait_until="domcontentloaded", timeout=45000)
+            await asyncio.sleep(2.5)
+        else:
+            await asyncio.sleep(1.0)
+    except Exception as nav_err:
+        logger.warning(f"Failed navigating to invitation manager for '{profile_id}': {nav_err}")
+        return 0
+
+    # Ensure on 'Received' invitations tab if tab controls exist
+    try:
+        await page.evaluate("""() => {
+            const tabs = document.querySelectorAll('button, a');
+            for (const t of tabs) {
+                const txt = (t.innerText || t.textContent || '').trim().toLowerCase();
+                if (txt.includes('received')) {
+                    t.click();
+                    break;
+                }
+            }
+        }""")
+        await asyncio.sleep(1.0)
+    except Exception:
+        pass
+
+    consecutive_empty = 0
+    max_passes = 15
+
+    for pass_idx in range(max_passes):
+        try:
+            buttons = await page.evaluate(SCRIPT_SCAN_ACCEPT_BUTTONS)
+        except Exception as eval_err:
+            logger.debug(f"Error evaluating accept buttons: {eval_err}")
+            buttons = []
+
+        if not buttons:
+            consecutive_empty += 1
+            if consecutive_empty >= 2:
+                break
+            try:
+                await page.mouse.wheel(0, 400)
+            except Exception:
+                pass
+            await asyncio.sleep(1.0)
+            continue
+
+        consecutive_empty = 0
+        logger.info(f"Found {len(buttons)} pending incoming invitation(s) to accept on pass {pass_idx + 1}...")
+
+        for b_info in buttons:
+            tag = b_info["tag"]
+            name = b_info["name"]
+            profile_url = b_info["profileUrl"]
+
+            clicked = False
+            # 1. Try Playwright locator click
+            try:
+                loc = page.locator(f"[data-ac-accept='{tag}']").first
+                if await loc.count() > 0:
+                    await loc.scroll_into_view_if_needed()
+                    await asyncio.sleep(0.2)
+                    await loc.click(timeout=4000)
+                    clicked = True
+            except Exception:
+                clicked = False
+
+            # 2. Fallback: JavaScript direct click
+            if not clicked:
+                try:
+                    js_clicked = await page.evaluate(f"""() => {{
+                        const el = document.querySelector("[data-ac-accept='{tag}']");
+                        if (el) {{
+                            el.scrollIntoView({{ behavior: 'instant', block: 'center' }});
+                            el.click();
+                            return true;
+                        }}
+                        return false;
+                    }}""")
+                    clicked = bool(js_clicked)
+                except Exception:
+                    clicked = False
+
+            if clicked:
+                accepted_count += 1
+                logger.info(f"✓ [{accepted_count}] Accepted incoming connection invitation from: {name}")
+                try:
+                    await db.record_accepted_connection(
+                        profile_id=profile_id,
+                        sender_name=name,
+                        sender_url=profile_url
+                    )
+                except Exception as db_err:
+                    logger.debug(f"DB record accepted connection: {db_err}")
+
+                cooldown = random.uniform(0.6, 1.2)
+                await asyncio.sleep(cooldown)
+            else:
+                logger.warning(f"Could not click Accept button for {name}")
+
+        await asyncio.sleep(1.5)
+
+    if accepted_count > 0:
+        logger.info(f"🎉 Completed incoming invitations check for '{profile_id}': Successfully accepted all {accepted_count} pending invitation(s)!")
+    else:
+        logger.info(f"ℹ️ No pending incoming invitations found for '{profile_id}'.")
+
+    return accepted_count
+
+
 async def open_interactive_session(
     profile_id: str,
     start_url: Optional[str] = None,
     timeout_seconds: int = 360,
-    auto_connect: bool = True
+    auto_connect: bool = True,
+    headless: bool = True
 ) -> None:
     """
-    Opens or reuses a visible (headed) browser session:
-    - If a browser is already open for this profile, opens a NEW TAB in that same browser window.
-    - If not open, launches the browser with Google Chrome / Chromium.
-    - Handles proxy connection failures automatically so login is never blocked.
-    - Monitors authentication; once logged in, automatically sends connection requests
-      rapidly up to the profile's daily cap to profiles having >= 100 mutual connections!
+    Opens or reuses a browser session (silent headless mode by default for automation;
+    headed mode when explicitly requested for operator login):
+    - If a browser is already open for this profile, opens a NEW TAB in that same browser context.
+    - If not open, launches the browser context.
+    - Automatically handles proxy failures so navigation is never blocked.
+    - Monitors authentication; once authenticated and auto_connect is True, automatically
+      accepts pending incoming invitations and sends connection requests directly via My Network
+      (target profiles with >= 50 mutual connections, founders, recruiters, SWEs) up to the daily cap.
     """
-    logger.info(f"Starting interactive session for profile '{profile_id}'")
+    mode_str = "silent background (headless)" if headless else "visible on screen (headed)"
+    logger.info(f"Starting browser session for profile '{profile_id}' in {mode_str} mode")
     profile = await db.get_profile(profile_id)
     if not profile:
         logger.error(f"Profile {profile_id} not found")
@@ -955,24 +1166,24 @@ async def open_interactive_session(
         try:
             context, pw_instance, is_new_launch = await get_or_create_context(
                 profile_id=profile_id,
-                headless=False,
+                headless=headless,
                 proxy_url=proxy_url
             )
+            # Open in a NEW TAB in the browser
+            page = await context.new_page()
         except Exception as launch_err:
-            if proxy_url:
-                logger.warning(f"Context launch failed with proxy ({launch_err}). Retrying without proxy...")
-                context, pw_instance, is_new_launch = await get_or_create_context(
-                    profile_id=profile_id,
-                    headless=False,
-                    proxy_url=None
-                )
-            else:
-                raise launch_err
+            logger.warning(f"Initial context or page creation failed for '{profile_id}' ({launch_err}). Forcing clean restart...")
+            await close_session(profile_id)
+            target_proxy = None if (proxy_url and "proxy" in str(launch_err).lower()) else proxy_url
+            context, pw_instance, is_new_launch = await get_or_create_context(
+                profile_id=profile_id,
+                headless=headless,
+                proxy_url=target_proxy
+            )
+            page = await context.new_page()
 
-        # Open in a NEW TAB in the same browser window
-        page = await context.new_page()
         await page.bring_to_front()
-        logger.info(f"Opened new tab in browser for profile '{profile_id}'. Navigating to {target_start_url}")
+        logger.info(f"Opened tab in browser for profile '{profile_id}'. Navigating to {target_start_url}")
 
         try:
             await page.goto(target_start_url, wait_until="domcontentloaded", timeout=60000)
@@ -982,7 +1193,7 @@ async def open_interactive_session(
                 await close_session(profile_id)
                 context, pw_instance, is_new_launch = await get_or_create_context(
                     profile_id=profile_id,
-                    headless=False,
+                    headless=headless,
                     proxy_url=None
                 )
                 page = await context.new_page()
@@ -995,8 +1206,9 @@ async def open_interactive_session(
         elapsed = 0
         check_interval = 2
         authenticated = False
+        effective_timeout = 30 if headless else timeout_seconds
 
-        while elapsed < timeout_seconds:
+        while elapsed < effective_timeout:
             if not context.pages or page.is_closed():
                 logger.info("Login tab closed by operator.")
                 break
@@ -1019,8 +1231,33 @@ async def open_interactive_session(
             await asyncio.sleep(check_interval)
             elapsed += check_interval
 
-        # If authenticated and auto_connect requested, directly send connection invitations!
+        if not authenticated:
+            if headless:
+                logger.warning(
+                    f"⚠️ Profile '{profile_id}' is not logged in. Headless run aborted. "
+                    f"Please click 'Headed Login' in the dashboard to sign in interactively once."
+                )
+            else:
+                logger.warning(f"Authentication timed out for profile '{profile_id}' after {timeout_seconds}s.")
+
+        # If authenticated and auto_connect requested:
         if authenticated and auto_connect:
+            worker_page = page if (page and not page.is_closed()) else await context.new_page()
+            await worker_page.bring_to_front()
+            await db.update_profile_status(profile_id, "running")
+
+            # 1. Automatically check and accept all pending incoming invitations
+            try:
+                accepted_count = await auto_accept_pending_invitations(
+                    page=worker_page,
+                    profile_id=profile_id
+                )
+                if accepted_count > 0:
+                    logger.info(f"⚡ Successfully accepted {accepted_count} pending incoming invitation(s) for '{profile_id}'!")
+            except Exception as accept_err:
+                logger.warning(f"Error checking/accepting incoming invitations for '{profile_id}': {accept_err}")
+
+            # 2. Check daily outgoing cap and send outgoing connection invitations
             daily_limit = profile.get("daily_limit", 30)
             today_str = datetime.now().strftime("%Y-%m-%d")
             already_sent_today = await db.get_today_sent_count(profile_id, today_str)
@@ -1034,10 +1271,6 @@ async def open_interactive_session(
                     f"(Already sent today: {already_sent_today}/{daily_limit}, Remaining: {remaining_needed}, "
                     f"Target: My Network [>100 Mutual Connections, Tech Founders, HRs, SWEs])..."
                 )
-                await db.update_profile_status(profile_id, "running")
-                worker_page = page if (page and not page.is_closed()) else await context.new_page()
-                await worker_page.bring_to_front()
-
                 sent = await auto_send_network_invitations(
                     page=worker_page,
                     profile_id=profile_id,
@@ -1047,12 +1280,24 @@ async def open_interactive_session(
                 logger.info(f"⚡ Completed sending {sent} connection invitations for '{profile_id}' directly via My Network in this run.")
                 await asyncio.sleep(2)
 
-        logger.info(f"Interactive session finished for profile '{profile_id}'")
+        logger.info(f"Session finished for profile '{profile_id}'")
 
-    except Exception as e:
-        logger.error(f"Error during interactive session for {profile_id}: {e}", exc_info=True)
+    except BaseException as e:
+        logger.error(f"Error or interrupt during session for {profile_id}: {e}", exc_info=True)
+        if "closed" in str(e).lower() or "TargetClosedError" in type(e).__name__:
+            await close_session(profile_id)
+        if isinstance(e, (asyncio.CancelledError, KeyboardInterrupt)):
+            raise
     finally:
-        await db.update_profile_status(profile_id, "idle", update_last_run=True)
+        try:
+            await db.update_profile_status(profile_id, "idle", update_last_run=True)
+        except Exception as db_err:
+            logger.error(f"Error resetting profile '{profile_id}' to idle in finally: {db_err}")
+        if headless:
+            try:
+                await close_session(profile_id)
+            except Exception as close_err:
+                logger.error(f"Error closing headless session for '{profile_id}': {close_err}")
 
 
 
@@ -1204,7 +1449,7 @@ async def execute_interaction_step(page: Page, target_url: str, custom_note: Opt
     return {"success": True, "message": "Action executed successfully"}
 
 
-async def run_profile_queue(profile_id: str, headless: bool = False) -> Dict[str, Any]:
+async def run_profile_queue(profile_id: str, headless: bool = True) -> Dict[str, Any]:
     """
     Worker pipeline:
     1. Loads profile and verifies pending work
@@ -1235,13 +1480,22 @@ async def run_profile_queue(profile_id: str, headless: bool = False) -> Dict[str
     failed_count = 0
 
     try:
-        context, pw_instance, is_new = await get_or_create_context(
-            profile_id=profile_id,
-            headless=headless,
-            proxy_url=profile.get("proxy_url")
-        )
-
-        page = await context.new_page()
+        try:
+            context, pw_instance, is_new = await get_or_create_context(
+                profile_id=profile_id,
+                headless=headless,
+                proxy_url=profile.get("proxy_url")
+            )
+            page = await context.new_page()
+        except Exception as launch_err:
+            logger.warning(f"Failed to obtain page in context for '{profile_id}': {launch_err}. Retrying fresh context...")
+            await close_session(profile_id)
+            context, pw_instance, is_new = await get_or_create_context(
+                profile_id=profile_id,
+                headless=headless,
+                proxy_url=profile.get("proxy_url")
+            )
+            page = await context.new_page()
 
         for item in pending_items:
             item_id = item["id"]
@@ -1286,6 +1540,8 @@ async def run_profile_queue(profile_id: str, headless: bool = False) -> Dict[str
         logger.error(f"Batch execution error for profile {profile_id}: {e}", exc_info=True)
     finally:
         await db.update_profile_status(profile_id, "idle", update_last_run=True)
+        if headless:
+            await close_session(profile_id)
 
     summary = {
         "profile_id": profile_id,

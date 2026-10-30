@@ -18,6 +18,48 @@ SCHEDULER_RUNNING = False
 SCHEDULER_TASK: Optional[asyncio.Task] = None
 SCHEDULER_CHECK_INTERVAL_SECONDS = 60
 LAST_CHECK_TIME: Optional[str] = None
+ACTIVE_AUTOMATION_TASKS: Dict[str, asyncio.Task] = {}
+
+
+async def auto_heal_stuck_profiles() -> None:
+    """
+    Self-Healing Watchdog:
+    Checks all profiles. If a profile is in 'authenticating' or 'running' status
+    but has no active background task and no active browser context in browser_engine
+    (or if it has been stuck for more than 15 minutes), automatically recovers it back to 'idle'.
+    """
+    try:
+        profiles = await db.get_all_profiles()
+        now = datetime.now()
+        for p in profiles:
+            pid = p["id"]
+            status = p.get("status")
+            if status in ("authenticating", "running"):
+                has_task = (pid in ACTIVE_AUTOMATION_TASKS and not ACTIVE_AUTOMATION_TASKS[pid].done())
+                has_session = (pid in engine.ACTIVE_SESSIONS)
+                
+                # Check elapsed time since last_run_at if present
+                is_stale_time = False
+                last_run = p.get("last_run_at")
+                if last_run:
+                    try:
+                        dt = datetime.strptime(last_run, "%Y-%m-%d %H:%M:%S")
+                        if (now - dt).total_seconds() > 900:  # 15 minutes
+                            is_stale_time = True
+                    except Exception:
+                        pass
+
+                if (not has_task and not has_session) or is_stale_time:
+                    logger.warning(
+                        f"🛡️ [Self-Healing Watchdog] Profile '{pid}' was stuck in '{status}' "
+                        f"(has_task={has_task}, has_session={has_session}, is_stale_time={is_stale_time}). "
+                        f"Auto-recovering profile status back to 'idle' and clearing locks..."
+                    )
+                    engine.kill_stale_profile_locks(pid)
+                    await engine.close_session(pid)
+                    await db.update_profile_status(pid, "idle")
+    except Exception as heal_err:
+        logger.error(f"[Self-Healing Watchdog] Error checking profiles: {heal_err}")
 
 
 async def run_profile_daily_automation(profile_id: str, force: bool = False) -> Dict[str, Any]:
@@ -49,12 +91,13 @@ async def run_profile_daily_automation(profile_id: str, force: bool = False) -> 
     )
 
     try:
-        # Launch session with auto_connect enabled
+        # Launch session with auto_connect enabled silently in headless mode
         await engine.open_interactive_session(
             profile_id=profile_id,
             start_url="https://www.linkedin.com/mynetwork/grow/",
             timeout_seconds=600,
-            auto_connect=True
+            auto_connect=True,
+            headless=True
         )
 
         final_sent_today = await db.get_today_sent_count(profile_id, today_str)
@@ -68,6 +111,14 @@ async def run_profile_daily_automation(profile_id: str, force: bool = False) -> 
     except Exception as e:
         logger.error(f"❌ [Daily Auto-Pilot] Failed daily run for '{profile_id}': {e}", exc_info=True)
         return {"success": False, "message": str(e)}
+    finally:
+        # Guarantee profile status is never left stuck in authenticating or running
+        try:
+            cur_p = await db.get_profile(profile_id)
+            if cur_p and cur_p.get("status") != "idle":
+                await db.update_profile_status(profile_id, "idle", update_last_run=True)
+        except Exception as fin_err:
+            logger.error(f"[Daily Auto-Pilot] Error in finally status reset for '{profile_id}': {fin_err}")
 
 
 async def check_and_run_daily_tasks() -> None:
@@ -79,6 +130,9 @@ async def check_and_run_daily_tasks() -> None:
     LAST_CHECK_TIME = now.strftime("%Y-%m-%d %H:%M:%S")
 
     try:
+        # Run watchdog first: recover any stale or stuck profiles
+        await auto_heal_stuck_profiles()
+
         due_profiles = await db.get_auto_pilot_due_profiles(current_hour=current_hour, today_str=today_str)
         if not due_profiles:
             return
@@ -89,6 +143,11 @@ async def check_and_run_daily_tasks() -> None:
                 logger.debug(f"[Daily Auto-Pilot] Profile '{profile_id}' is currently {p.get('status')}; postponing until idle.")
                 continue
 
+            # Ensure we do not start duplicate runs for the same profile
+            if profile_id in ACTIVE_AUTOMATION_TASKS and not ACTIVE_AUTOMATION_TASKS[profile_id].done():
+                logger.debug(f"[Daily Auto-Pilot] Task already in progress for '{profile_id}'.")
+                continue
+
             daily_limit = p.get("daily_limit", 30)
             sched_hr = p.get("schedule_hour", 9)
             logger.info(
@@ -96,8 +155,14 @@ async def check_and_run_daily_tasks() -> None:
                 f"(Configured hour: {sched_hr:02d}:00, current: {now.strftime('%H:%M:%S')}, limit: {daily_limit}/day)."
             )
 
-            # Run in background so other checks aren't held up
-            asyncio.create_task(run_profile_daily_automation(profile_id, force=False))
+            # Keep strong reference to task to prevent garbage collection!
+            task = asyncio.create_task(run_profile_daily_automation(profile_id, force=False))
+            ACTIVE_AUTOMATION_TASKS[profile_id] = task
+
+            def _on_done(t, pid=profile_id):
+                ACTIVE_AUTOMATION_TASKS.pop(pid, None)
+
+            task.add_done_callback(_on_done)
 
     except Exception as e:
         logger.error(f"[Daily Auto-Pilot] Error in check_and_run_daily_tasks: {e}", exc_info=True)
